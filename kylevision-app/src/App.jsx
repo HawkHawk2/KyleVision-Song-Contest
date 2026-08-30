@@ -696,32 +696,50 @@ function SubmitView() {
   );
 }
 
+function getViewFromPath() {
+  const path = window.location.pathname.replace(/^\/+|\/+$/g, "").toLowerCase();
+  if (["admin", "public", "overlay", "submit"].includes(path)) return path;
+  const params = new URLSearchParams(window.location.search);
+  const q = params.get("view");
+  if (["admin", "public", "overlay", "submit"].includes(q)) return q;
+  return "admin";
+}
+
 export default function App() {
-  const [view, setView] = useState("admin");
+  const initial = getViewFromPath();
+  const [view, setView] = useState(initial);
+  const isDedicatedRoute = window.location.pathname.replace(/^\/+|\/+$/g, "") !== "";
+
+  const goTo = (v) => {
+    setView(v);
+    window.history.pushState({}, "", `/${v}`);
+  };
 
   return (
     <div style={{ padding: "1.5rem 1rem", maxWidth: 900, margin: "0 auto" }}>
-      <div style={{ display: "flex", gap: 6, marginBottom: 24, flexWrap: "wrap" }}>
-        {[
-          ["admin", "Admin (mod only)"],
-          ["public", "Public bracket"],
-          ["overlay", "OBS overlay"],
-          ["submit", "Submit song"],
-        ].map(([k, label]) => (
-          <button
-            key={k}
-            onClick={() => setView(k)}
-            style={{
-              fontSize: 12,
-              padding: "6px 10px",
-              background: view === k ? "var(--surface-1)" : "transparent",
-              fontWeight: view === k ? 500 : 400,
-            }}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      {!isDedicatedRoute && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 24, flexWrap: "wrap" }}>
+          {[
+            ["admin", "Admin (mod only)"],
+            ["public", "Public bracket"],
+            ["overlay", "OBS overlay"],
+            ["submit", "Submit song"],
+          ].map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => goTo(k)}
+              style={{
+                fontSize: 12,
+                padding: "6px 10px",
+                background: view === k ? "var(--surface-1)" : "transparent",
+                fontWeight: view === k ? 500 : 400,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       {view === "admin" && <AdminView />}
       {view === "public" && <PublicView />}
       {view === "overlay" && <OverlayView />}
