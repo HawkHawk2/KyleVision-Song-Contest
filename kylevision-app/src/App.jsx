@@ -96,12 +96,15 @@ function propagate(t) {
     }
   }
   // propagate losers bracket forward + feed subsequent winners-round losers in
-  for (let r = 0; r < t.losers.length; r++) {
+  const losersRoundsAtStart = t.losers.length;
+  for (let r = 0; r < losersRoundsAtStart; r++) {
     const cur = t.losers[r];
     let next = t.losers[r + 1];
-    if (!next) {
+    if (!next && r === losersRoundsAtStart - 1) {
       next = Array.from({ length: Math.max(1, Math.ceil(cur.length / 2)) }, () => makeMatch(null, null));
       t.losers.push(next);
+    } else if (!next) {
+      continue;
     }
     for (let i = 0; i < cur.length; i++) {
       const m = cur[i];
