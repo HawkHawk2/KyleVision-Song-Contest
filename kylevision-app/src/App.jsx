@@ -8,7 +8,7 @@ const emptyTournament = () => ({
   id: uid(),
   name: "KyleVision",
   status: "setup", // setup | running | done
-  entrants: [], // {id, name, song, artist}
+  entrants: [], // {id, name, songs: [song1, song2, ...], songsUsed: 0}
   winners: [], // rounds: [ [match,...], [match,...] ]
   losers: [],
   grandFinal: null, // match
@@ -16,6 +16,20 @@ const emptyTournament = () => ({
   votes: { a: 0, b: 0 },
   activeMatchPath: null, // {bracket:'winners'|'losers'|'final', round, index}
 });
+
+// The song an entrant plays for a given match is songs[songsUsed], taken at
+// the moment they enter that match. songsUsed increments only when they WIN
+// and move on to the next match, so each round consumes the next song in
+// the order they submitted them.
+function currentSongFor(entrant) {
+  if (!entrant) return null;
+  const idx = Math.min(entrant.songsUsed || 0, entrant.songs.length - 1);
+  return entrant.songs[idx] || entrant.songs[entrant.songs.length - 1] || "(no song)";
+}
+function hasSongLeft(entrant) {
+  if (!entrant) return true;
+  return (entrant.songsUsed || 0) < entrant.songs.length;
+}
 
 function makeMatch(a, b) {
   return { id: uid(), a: a || null, b: b || null, winner: null };
@@ -68,6 +82,11 @@ function autoResolveByes(t) {
 }
 
 function propagate(t) {
+  const fresh = (entrant) => {
+    if (!entrant) return entrant;
+    const found = t.entrants.find((e) => e.id === entrant.id);
+    return found || entrant;
+  };
   // push winners bracket winners forward into next round
   for (let r = 0; r < t.winners.length - 1; r++) {
     const cur = t.winners[r];
@@ -76,8 +95,8 @@ function propagate(t) {
       const m = cur[i];
       const slot = next[Math.floor(i / 2)];
       if (m.winner) {
-        if (i % 2 === 0) slot.a = m.winner;
-        else slot.b = m.winner;
+        if (i % 2 === 0) slot.a = fresh(m.winner);
+        else slot.b = fresh(m.winner);
       }
     }
   }
@@ -91,8 +110,8 @@ function propagate(t) {
       const loser = m.a && m.winner.id === m.a.id ? m.b : m.a;
       if (!loser) continue;
       const slot = lr0[Math.floor(i / 2)];
-      if (i % 2 === 0) slot.a = loser;
-      else slot.b = loser;
+      if (i % 2 === 0) slot.a = fresh(loser);
+      else slot.b = fresh(loser);
     }
   }
   // propagate losers bracket forward + feed subsequent winners-round losers in
@@ -110,8 +129,8 @@ function propagate(t) {
       const m = cur[i];
       if (!m.winner) continue;
       const slot = next[Math.floor(i / 2)];
-      if (!slot.a) slot.a = m.winner;
-      else if (!slot.b && slot.a.id !== m.winner.id) slot.b = m.winner;
+      if (!slot.a) slot.a = fresh(m.winner);
+      else if (!slot.b && slot.a.id !== m.winner.id) slot.b = fresh(m.winner);
     }
   }
   // feed winners-round(r>=1) losers into losers bracket at corresponding depth
@@ -129,8 +148,8 @@ function propagate(t) {
       const loser = m.a && m.winner.id === m.a.id ? m.b : m.a;
       if (!loser) continue;
       const slot = target[Math.min(i, target.length - 1)];
-      if (!slot.a) slot.a = loser;
-      else if (!slot.b) slot.b = loser;
+      if (!slot.a) slot.a = fresh(loser);
+      else if (!slot.b) slot.b = fresh(loser);
     }
   }
   // set up grand final once both finals resolved
@@ -138,7 +157,7 @@ function propagate(t) {
   const lFinalRound = t.losers[t.losers.length - 1];
   const lFinal = lFinalRound ? lFinalRound[lFinalRound.length - 1] : null;
   if (wFinal?.winner && lFinal?.winner && !t.grandFinal) {
-    t.grandFinal = makeMatch(wFinal.winner, lFinal.winner);
+    t.grandFinal = makeMatch(fresh(wFinal.winner), fresh(lFinal.winner));
   } else if (t.grandFinal) {
     if (wFinal?.winner) t.grandFinal.a = wFinal.winner;
     if (lFinal?.winner) t.grandFinal.b = lFinal.winner;
@@ -189,7 +208,7 @@ async function saveState(t) {
 }
 async function loadSubs() {
   try {
-    const rows = await sb("submissions?select=id,name,song&order=created_at.asc");
+    const rows = await sb("submissions?select=id,name,songs&order=created_at.asc");
     return rows || [];
   } catch (e) {
     console.error("load failed", e);
@@ -202,19 +221,46 @@ async function saveSubs(subs) {
   // Kept for API compatibility with the rest of the app.
   return subs;
 }
-async function addSubmission(name, song) {
+async function addSubmission(name, songs) {
   await sb("submissions", {
     method: "POST",
-    body: JSON.stringify([{ id: uid(), name, song }]),
+    body: JSON.stringify([{ id: uid(), name, songs }]),
   });
 }
 async function deleteSubmission(id) {
   await sb(`submissions?id=eq.${id}`, { method: "DELETE" });
 }
 
+const ADMIN_SESSION_KEY = "kv-admin-unlocked";
+
+async function getAdminPasswordHash() {
+  try {
+    const rows = await sb("admin_config?id=eq.main&select=password_hash");
+    return rows && rows.length > 0 ? rows[0].password_hash : null;
+  } catch {
+    return null;
+  }
+}
+async function setAdminPassword(hash) {
+  const existing = await sb("admin_config?id=eq.main&select=id");
+  if (existing && existing.length > 0) {
+    await sb("admin_config?id=eq.main", { method: "PATCH", body: JSON.stringify({ password_hash: hash }) });
+  } else {
+    await sb("admin_config", { method: "POST", body: JSON.stringify([{ id: "main", password_hash: hash }]) });
+  }
+}
+async function simpleHash(text) {
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function nameFor(entrant, anonymous, label) {
   if (!entrant) return null;
-  return anonymous ? label : `${entrant.name} — ${entrant.song}`;
+  if (anonymous) return label;
+  const song = currentSongFor(entrant);
+  const songNum = (entrant.songsUsed || 0) + 1;
+  return `${entrant.name} — ${song} (song ${songNum}/${entrant.songs.length})`;
 }
 
 function MatchCard({ m, label, anonymous, onPick, editable }) {
@@ -231,6 +277,7 @@ function MatchCard({ m, label, anonymous, onPick, editable }) {
   const row = (side, entrant) => {
     const won = isDone && entrant && m.winner.id === entrant.id;
     const lost = isDone && entrant && m.winner.id !== entrant.id;
+    const outOfSongs = entrant && !anonymous && !hasSongLeft(entrant);
     return (
       <div
         onClick={() => pick(side)}
@@ -250,7 +297,14 @@ function MatchCard({ m, label, anonymous, onPick, editable }) {
         <span style={{ fontSize: 13, fontWeight: won ? 500 : 400 }}>
           {entrant ? nameFor(entrant, anonymous, side === "a" ? `${label} · 1` : `${label} · 2`) : "TBD"}
         </span>
-        {won && <i className="ti ti-check" style={{ fontSize: 14, color: "var(--text-success)" }} aria-hidden="true" />}
+        <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {outOfSongs && (
+            <span style={{ fontSize: 11, color: "var(--text-warning)", background: "var(--bg-warning)", padding: "2px 6px", borderRadius: 4 }}>
+              out of songs
+            </span>
+          )}
+          {won && <i className="ti ti-check" style={{ fontSize: 14, color: "var(--text-success)" }} aria-hidden="true" />}
+        </span>
       </div>
     );
   };
@@ -290,7 +344,95 @@ function BracketColumn({ title, rounds, anonymous, onPick, editable, labelPrefix
   );
 }
 
+function AdminLock({ onUnlock }) {
+  const [existingHash, setExistingHash] = useState(undefined); // undefined = loading, null = no password set yet
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      setExistingHash(await getAdminPasswordHash());
+    })();
+  }, []);
+
+  const submitFirstTime = async () => {
+    if (pw.length < 4) {
+      setErr("Password should be at least 4 characters");
+      return;
+    }
+    if (pw !== pw2) {
+      setErr("Passwords don't match");
+      return;
+    }
+    const hash = await simpleHash(pw);
+    await setAdminPassword(hash);
+    localStorage.setItem(ADMIN_SESSION_KEY, hash);
+    onUnlock();
+  };
+
+  const submitLogin = async () => {
+    const hash = await simpleHash(pw);
+    if (hash !== existingHash) {
+      setErr("Wrong password");
+      return;
+    }
+    localStorage.setItem(ADMIN_SESSION_KEY, hash);
+    onUnlock();
+  };
+
+  if (existingHash === undefined) {
+    return <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>;
+  }
+
+  if (existingHash === null) {
+    return (
+      <div style={{ maxWidth: 360, margin: "3rem auto", textAlign: "center" }}>
+        <i className="ti ti-lock" style={{ fontSize: 28, color: "var(--text-muted)" }} aria-hidden="true" />
+        <h2>Set an admin password</h2>
+        <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>No password is set yet. Choose one now — you'll need it (and share it only with co-mods) to get back in.</p>
+        <input type="password" placeholder="New password" value={pw} onChange={(e) => setPw(e.target.value)} style={{ width: "100%", marginBottom: 8 }} />
+        <input type="password" placeholder="Confirm password" value={pw2} onChange={(e) => setPw2(e.target.value)} style={{ width: "100%", marginBottom: 8 }} />
+        {err && <p style={{ color: "var(--text-danger)", fontSize: 13 }}>{err}</p>}
+        <button onClick={submitFirstTime} style={{ width: "100%", borderColor: "var(--border-accent)", color: "var(--text-accent)" }}>Set password & continue</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ maxWidth: 320, margin: "3rem auto", textAlign: "center" }}>
+      <i className="ti ti-lock" style={{ fontSize: 28, color: "var(--text-muted)" }} aria-hidden="true" />
+      <h2>Admin login</h2>
+      <input type="password" placeholder="Password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitLogin()} style={{ width: "100%", marginBottom: 8 }} />
+      {err && <p style={{ color: "var(--text-danger)", fontSize: 13 }}>{err}</p>}
+      <button onClick={submitLogin} style={{ width: "100%", borderColor: "var(--border-accent)", color: "var(--text-accent)" }}>Unlock</button>
+    </div>
+  );
+}
+
 function AdminView() {
+  const [unlocked, setUnlocked] = useState(false);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const savedHash = localStorage.getItem(ADMIN_SESSION_KEY);
+      if (savedHash) {
+        const realHash = await getAdminPasswordHash();
+        if (realHash && savedHash === realHash) {
+          setUnlocked(true);
+        }
+      }
+      setChecking(false);
+    })();
+  }, []);
+
+  if (checking) return <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>;
+  if (!unlocked) return <AdminLock onUnlock={() => setUnlocked(true)} />;
+  return <AdminPanel />;
+}
+
+function AdminPanel() {
   const [t, setT] = useState(null);
   const [subs, setSubs] = useState([]);
   const [nameInput, setNameInput] = useState("");
@@ -316,12 +458,13 @@ function AdminView() {
   };
 
   const addEntrant = () => {
-    if (!nameInput.trim() || !songInput.trim()) {
-      setErr("Enter both a name and a song");
+    const songs = songInput.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (!nameInput.trim() || songs.length === 0) {
+      setErr("Enter a name and at least one song");
       return;
     }
     setErr("");
-    const next = { ...t, entrants: [...t.entrants, { id: uid(), name: nameInput.trim(), song: songInput.trim() }] };
+    const next = { ...t, entrants: [...t.entrants, { id: uid(), name: nameInput.trim(), songs, songsUsed: 0 }] };
     setNameInput("");
     setSongInput("");
     persist(next);
@@ -332,7 +475,8 @@ function AdminView() {
   };
 
   const approveSub = async (s) => {
-    const next = { ...t, entrants: [...t.entrants, { id: uid(), name: s.name, song: s.song }] };
+    const songs = Array.isArray(s.songs) ? s.songs : (s.song ? [s.song] : []);
+    const next = { ...t, entrants: [...t.entrants, { id: uid(), name: s.name, songs, songsUsed: 0 }] };
     await persist(next);
     await deleteSubmission(s.id);
     setSubs(subs.filter((x) => x.id !== s.id));
@@ -341,6 +485,15 @@ function AdminView() {
   const rejectSub = async (s) => {
     await deleteSubmission(s.id);
     setSubs(subs.filter((x) => x.id !== s.id));
+  };
+
+  const shuffleEntrants = () => {
+    const shuffled = [...t.entrants];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    persist({ ...t, entrants: shuffled });
   };
 
   const startTournament = () => {
@@ -359,7 +512,17 @@ function AdminView() {
   const pickWinner = (bracketName, ri, mi, winner) => {
     const next = structuredClone(t);
     const bracket = bracketName === "losers" ? next.losers : next.winners;
+
+    // the match card should keep showing the song they just played
     bracket[ri][mi].winner = winner;
+
+    // bump the winner's song count on the master entrant record so future
+    // rounds pull their next song
+    const masterIdx = next.entrants.findIndex((e) => e.id === winner.id);
+    if (masterIdx !== -1) {
+      next.entrants[masterIdx] = { ...next.entrants[masterIdx], songsUsed: (next.entrants[masterIdx].songsUsed || 0) + 1 };
+    }
+
     propagate(next);
     next.votes = { a: 0, b: 0 };
     next.votingOpen = false;
@@ -386,7 +549,8 @@ function AdminView() {
 
   const resetAll = () => {
     if (!confirm("Reset the whole tournament? Entrants list is kept, bracket is cleared.")) return;
-    persist({ ...emptyTournament(), name: t.name, entrants: t.entrants });
+    const resetEntrants = t.entrants.map((e) => ({ ...e, songsUsed: 0 }));
+    persist({ ...emptyTournament(), name: t.name, entrants: resetEntrants });
   };
 
   if (!t) return <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>;
@@ -429,7 +593,7 @@ function AdminView() {
                 {subs.map((s) => (
                   <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-1)", padding: "8px 12px", borderRadius: 8 }}>
                     <span style={{ fontSize: 13 }}>
-                      <strong style={{ fontWeight: 500 }}>{s.name}</strong> — {s.song}
+                      <strong style={{ fontWeight: 500 }}>{s.name}</strong> — {(s.songs || []).length} song{(s.songs || []).length === 1 ? "" : "s"}: {(s.songs || []).join(", ")}
                     </span>
                     <div style={{ display: "flex", gap: 6 }}>
                       <button onClick={() => approveSub(s)}><i className="ti ti-check" aria-hidden="true" /> Approve</button>
@@ -444,18 +608,29 @@ function AdminView() {
           <h3>Add entrant manually</h3>
           <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
             <input placeholder="Viewer name" value={nameInput} onChange={(e) => setNameInput(e.target.value)} style={{ flex: "1 1 160px" }} />
-            <input placeholder="Song — artist" value={songInput} onChange={(e) => setSongInput(e.target.value)} style={{ flex: "2 1 220px" }} />
+            <textarea
+              placeholder={"One song per line, in the order they should be played\ne.g.\nSong A — Artist\nSong B — Artist"}
+              value={songInput}
+              onChange={(e) => setSongInput(e.target.value)}
+              rows={3}
+              style={{ flex: "2 1 220px", background: "var(--surface-2)", color: "var(--text-primary)", borderRadius: "var(--radius)", border: "0.5px solid var(--border)", padding: "8px 12px", fontFamily: "inherit", fontSize: 14 }}
+            />
             <button onClick={addEntrant}><i className="ti ti-plus" aria-hidden="true" /> Add</button>
           </div>
           {err && <p style={{ color: "var(--text-danger)", fontSize: 13 }}>{err}</p>}
 
-          <h3 style={{ marginTop: 20 }}>Entrants ({t.entrants.length})</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 20 }}>
+            <h3 style={{ margin: 0 }}>Entrants ({t.entrants.length})</h3>
+            {t.entrants.length > 1 && (
+              <button onClick={shuffleEntrants}><i className="ti ti-refresh" aria-hidden="true" /> Shuffle order</button>
+            )}
+          </div>
           {t.entrants.length === 0 && <p style={{ color: "var(--text-muted)", fontSize: 13 }}>No entrants yet.</p>}
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {t.entrants.map((e) => (
               <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface-1)", padding: "8px 12px", borderRadius: 8 }}>
                 <span style={{ fontSize: 13 }}>
-                  <strong style={{ fontWeight: 500 }}>{e.name}</strong> — {e.song}
+                  <strong style={{ fontWeight: 500 }}>{e.name}</strong> — {(e.songs || []).length} song{(e.songs || []).length === 1 ? "" : "s"} ({(e.songsUsed || 0)} used)
                 </span>
                 <button onClick={() => removeEntrant(e.id)} aria-label="Remove"><i className="ti ti-trash" aria-hidden="true" /></button>
               </div>
@@ -492,7 +667,7 @@ function AdminView() {
               {t.grandFinal?.winner && (
                 <div style={{ background: "var(--bg-success)", border: "0.5px solid var(--border-success)", borderRadius: 10, padding: 16, textAlign: "center" }}>
                   <p style={{ margin: 0, fontSize: 16, fontWeight: 500, color: "var(--text-success)" }}>
-                    Winner: {t.grandFinal.winner.name} — {t.grandFinal.winner.song}
+                    Winner: {t.grandFinal.winner.name} — {currentSongFor(t.grandFinal.winner)}
                   </p>
                 </div>
               )}
@@ -654,18 +829,27 @@ function OverlayView() {
 
 function SubmitView() {
   const [name, setName] = useState("");
-  const [song, setSong] = useState("");
+  const [songs, setSongs] = useState(["", ""]);
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState("");
 
+  const updateSong = (i, val) => {
+    const next = [...songs];
+    next[i] = val;
+    setSongs(next);
+  };
+  const addSongField = () => setSongs([...songs, ""]);
+  const removeSongField = (i) => setSongs(songs.filter((_, idx) => idx !== i));
+
   const submit = async () => {
-    if (!name.trim() || !song.trim()) {
-      setErr("Enter both your name and your song");
+    const cleaned = songs.map((s) => s.trim()).filter(Boolean);
+    if (!name.trim() || cleaned.length === 0) {
+      setErr("Enter your name and at least one song");
       return;
     }
     setErr("");
     try {
-      await addSubmission(name.trim(), song.trim());
+      await addSubmission(name.trim(), cleaned);
       setSent(true);
     } catch (e) {
       setErr("Couldn't submit right now, try again in a moment");
@@ -678,19 +862,43 @@ function SubmitView() {
         <i className="ti ti-check" style={{ fontSize: 32, color: "var(--text-success)" }} aria-hidden="true" />
         <h2 style={{ marginTop: 12 }}>Submission sent</h2>
         <p style={{ color: "var(--text-secondary)" }}>The mods will review it before it's added to the bracket.</p>
-        <button onClick={() => { setSent(false); setName(""); setSong(""); }} style={{ marginTop: 12 }}>Submit another</button>
+        <button onClick={() => { setSent(false); setName(""); setSongs(["", ""]); }} style={{ marginTop: 12 }}>Submit another</button>
       </div>
     );
   }
 
   return (
-    <div style={{ maxWidth: 400, margin: "0 auto" }}>
-      <h1>Submit your song</h1>
+    <div style={{ maxWidth: 440, margin: "0 auto" }}>
+      <h1>Submit your songs</h1>
       <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>Your identity stays hidden from other viewers until results are revealed.</p>
+      <div style={{ background: "var(--bg-accent)", border: "0.5px solid var(--border-accent)", borderRadius: 8, padding: "10px 12px", marginTop: 12 }}>
+        <p style={{ margin: 0, fontSize: 13, color: "var(--text-accent)" }}>
+          Add one song per round you might reach. The order matters: your 1st song plays in your first match, your 2nd song plays if you win that match, and so on. You won't know in advance how many rounds there are, so add as many as you're willing to enter.
+        </p>
+      </div>
+
       <label style={{ display: "block", fontSize: 13, color: "var(--text-secondary)", marginTop: 16, marginBottom: 4 }}>Your name</label>
       <input value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%" }} placeholder="Twitch username" />
-      <label style={{ display: "block", fontSize: 13, color: "var(--text-secondary)", marginTop: 12, marginBottom: 4 }}>Song</label>
-      <input value={song} onChange={(e) => setSong(e.target.value)} style={{ width: "100%" }} placeholder="Song title — artist" />
+
+      <label style={{ display: "block", fontSize: 13, color: "var(--text-secondary)", marginTop: 16, marginBottom: 4 }}>Your songs, in play order</label>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {songs.map((s, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 18 }}>{i + 1}.</span>
+            <input
+              value={s}
+              onChange={(e) => updateSong(i, e.target.value)}
+              style={{ flex: 1 }}
+              placeholder="Song title — artist"
+            />
+            {songs.length > 1 && (
+              <button onClick={() => removeSongField(i)} aria-label="Remove song"><i className="ti ti-x" aria-hidden="true" /></button>
+            )}
+          </div>
+        ))}
+      </div>
+      <button onClick={addSongField} style={{ marginTop: 8 }}><i className="ti ti-plus" aria-hidden="true" /> Add another song</button>
+
       {err && <p style={{ color: "var(--text-danger)", fontSize: 13 }}>{err}</p>}
       <button onClick={submit} style={{ marginTop: 16, width: "100%", borderColor: "var(--border-accent)", color: "var(--text-accent)" }}>
         Submit
