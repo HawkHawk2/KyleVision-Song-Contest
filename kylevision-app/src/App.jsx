@@ -557,92 +557,170 @@ function AdminPanel() {
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
         <div>
-          <h1 style={{ margin: 0 }}>{t.name} — admin</h1>
-          <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--text-secondary)" }}>
-            Only you should have this link. Real names and songs are visible here.
-          </p>
+          <div style={{ fontSize: 12.5, letterSpacing: "0.04em", color: "var(--spark)", fontWeight: 700, marginBottom: 4 }}>Backstage</div>
+          <h1 style={{ fontSize: 34 }}>{t.name}</h1>
         </div>
-        <span style={{ fontSize: 12, padding: "4px 10px", borderRadius: 20, background: "var(--surface-1)", border: "0.5px solid var(--border)" }}>
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 700,
+            padding: "6px 12px",
+            borderRadius: 20,
+            background: t.status === "setup" ? "rgba(255,205,74,0.12)" : t.status === "done" ? "rgba(107,214,138,0.14)" : "rgba(255,79,126,0.12)",
+            color: t.status === "setup" ? "var(--gold)" : t.status === "done" ? "var(--ok)" : "var(--spark)",
+            border: "1px solid currentColor",
+          }}
+        >
           {t.status}
         </span>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 24, borderBottom: "1px solid var(--border)", paddingBottom: 2 }}>
         {["setup", "bracket", "voting"].map((tb) => (
           <button
             key={tb}
             onClick={() => setTab(tb)}
             style={{
-              background: tab === tb ? "var(--surface-1)" : "transparent",
-              fontWeight: tab === tb ? 500 : 400,
+              background: "transparent",
+              border: "none",
+              borderBottom: tab === tb ? "2px solid var(--spark)" : "2px solid transparent",
+              borderRadius: 0,
+              color: tab === tb ? "var(--text-primary)" : "var(--text-muted)",
+              fontWeight: tab === tb ? 700 : 500,
+              padding: "8px 4px",
+              marginRight: 20,
             }}
           >
-            {tb === "setup" ? "Setup & entrants" : tb === "bracket" ? "Bracket" : "Live voting"}
+            {tb === "setup" ? "Queue & entrants" : tb === "bracket" ? "Bracket" : "Live voting"}
           </button>
         ))}
       </div>
 
       {tab === "setup" && (
         <div>
-          {subs.length > 0 && (
-            <div style={{ marginBottom: 24 }}>
-              <h3>Pending submissions ({subs.length})</h3>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ marginBottom: 28 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
+              <h2 style={{ fontSize: 20 }}>Queue</h2>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{subs.length} waiting</span>
+            </div>
+            {subs.length === 0 ? (
+              <div style={{ padding: "24px 20px", textAlign: "center", background: "var(--stage-card)", border: "1px dashed var(--border)", borderRadius: "var(--radius)" }}>
+                <p style={{ margin: 0, fontSize: 13.5 }}>Nothing waiting for review. New entries will show up here as viewers submit.</p>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {subs.map((s) => (
-                  <div key={s.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-1)", padding: "8px 12px", borderRadius: 8 }}>
-                    <span style={{ fontSize: 13 }}>
-                      <strong style={{ fontWeight: 500 }}>{s.name}</strong> — {(s.songs || []).length} song{(s.songs || []).length === 1 ? "" : "s"}: {(s.songs || []).join(", ")}
-                    </span>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={() => approveSub(s)}><i className="ti ti-check" aria-hidden="true" /> Approve</button>
-                      <button onClick={() => rejectSub(s)}><i className="ti ti-x" aria-hidden="true" /> Reject</button>
+                  <div
+                    key={s.id}
+                    style={{
+                      background: "var(--stage-card)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius)",
+                      padding: "14px 16px",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 15.5, marginBottom: 6 }}>{s.name}</div>
+                        <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13.5, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 2 }}>
+                          {(s.songs || []).map((song, i) => (
+                            <li key={i}>{song}</li>
+                          ))}
+                        </ol>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                        <button
+                          onClick={() => approveSub(s)}
+                          style={{ background: "var(--ok)", color: "var(--stage-void)", fontWeight: 700, border: "none", padding: "8px 14px" }}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => rejectSub(s)}
+                          style={{ background: "transparent", color: "var(--text-muted)" }}
+                        >
+                          Reject
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
-          )}
-
-          <h3>Add entrant manually</h3>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-            <input placeholder="Viewer name" value={nameInput} onChange={(e) => setNameInput(e.target.value)} style={{ flex: "1 1 160px" }} />
-            <textarea
-              placeholder={"One song per line, in the order they should be played\ne.g.\nSong A — Artist\nSong B — Artist"}
-              value={songInput}
-              onChange={(e) => setSongInput(e.target.value)}
-              rows={3}
-              style={{ flex: "2 1 220px", background: "var(--surface-2)", color: "var(--text-primary)", borderRadius: "var(--radius)", border: "0.5px solid var(--border)", padding: "8px 12px", fontFamily: "inherit", fontSize: 14 }}
-            />
-            <button onClick={addEntrant}><i className="ti ti-plus" aria-hidden="true" /> Add</button>
-          </div>
-          {err && <p style={{ color: "var(--text-danger)", fontSize: 13 }}>{err}</p>}
-
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 20 }}>
-            <h3 style={{ margin: 0 }}>Entrants ({t.entrants.length})</h3>
-            {t.entrants.length > 1 && (
-              <button onClick={shuffleEntrants}><i className="ti ti-refresh" aria-hidden="true" /> Shuffle order</button>
             )}
           </div>
-          {t.entrants.length === 0 && <p style={{ color: "var(--text-muted)", fontSize: 13 }}>No entrants yet.</p>}
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {t.entrants.map((e) => (
-              <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface-1)", padding: "8px 12px", borderRadius: 8 }}>
-                <span style={{ fontSize: 13 }}>
-                  <strong style={{ fontWeight: 500 }}>{e.name}</strong> — {(e.songs || []).length} song{(e.songs || []).length === 1 ? "" : "s"} ({(e.songsUsed || 0)} used)
-                </span>
-                <button onClick={() => removeEntrant(e.id)} aria-label="Remove"><i className="ti ti-trash" aria-hidden="true" /></button>
-              </div>
-            ))}
+
+          <div style={{ marginBottom: 28 }}>
+            <h2 style={{ fontSize: 20, marginBottom: 12 }}>Add entrant manually</h2>
+            <div style={{ background: "var(--stage-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+              <input placeholder="Viewer name" value={nameInput} onChange={(e) => setNameInput(e.target.value)} />
+              <textarea
+                placeholder={"One song per line, in the order they should be played"}
+                value={songInput}
+                onChange={(e) => setSongInput(e.target.value)}
+                rows={3}
+              />
+              <button onClick={addEntrant} style={{ alignSelf: "flex-start", background: "var(--spark)", color: "var(--stage-void)", fontWeight: 700, border: "none" }}>
+                Add entrant
+              </button>
+              {err && <p style={{ color: "var(--spark)", fontSize: 13, margin: 0 }}>{err}</p>}
+            </div>
           </div>
 
-          <div style={{ marginTop: 24, display: "flex", gap: 8 }}>
-            <button onClick={startTournament} style={{ borderColor: "var(--border-accent)", color: "var(--text-accent)" }}>
-              <i className="ti ti-player-play" aria-hidden="true" /> {t.status === "setup" ? "Build bracket & start" : "Rebuild bracket"}
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <h2 style={{ fontSize: 20 }}>Entrants</h2>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{t.entrants.length}</span>
+              </div>
+              {t.entrants.length > 1 && (
+                <button onClick={shuffleEntrants} style={{ background: "transparent", color: "var(--text-secondary)" }}>
+                  Shuffle order
+                </button>
+              )}
+            </div>
+            {t.entrants.length === 0 ? (
+              <p style={{ fontSize: 13.5 }}>No entrants yet — approve submissions or add someone manually above.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {t.entrants.map((e) => (
+                  <div
+                    key={e.id}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      background: "var(--stage-card)",
+                      border: "1px solid var(--border)",
+                      padding: "10px 14px",
+                      borderRadius: 10,
+                    }}
+                  >
+                    <span style={{ fontSize: 14 }}>
+                      <strong>{e.name}</strong>
+                      <span style={{ color: "var(--text-muted)" }}> — {(e.songs || []).length} song{(e.songs || []).length === 1 ? "" : "s"}, {(e.songsUsed || 0)} used</span>
+                    </span>
+                    <button onClick={() => removeEntrant(e.id)} aria-label="Remove" style={{ background: "transparent", color: "var(--text-muted)", padding: "4px 8px" }}>
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginTop: 28, display: "flex", gap: 10 }}>
+            <button
+              onClick={startTournament}
+              style={{ background: "var(--spark)", color: "var(--stage-void)", fontWeight: 700, border: "none", padding: "12px 20px" }}
+            >
+              {t.status === "setup" ? "Build bracket & start" : "Rebuild bracket"}
             </button>
             {t.status !== "setup" && (
-              <button onClick={resetAll}><i className="ti ti-refresh" aria-hidden="true" /> Reset tournament</button>
+              <button onClick={resetAll} style={{ background: "transparent", color: "var(--text-secondary)" }}>
+                Reset tournament
+              </button>
             )}
           </div>
         </div>
@@ -852,57 +930,146 @@ function SubmitView() {
       await addSubmission(name.trim(), cleaned);
       setSent(true);
     } catch (e) {
-      setErr("Couldn't submit right now, try again in a moment");
+      setErr("Couldn't submit right now — try again in a moment");
     }
   };
 
   if (sent) {
     return (
-      <div style={{ textAlign: "center", padding: "3rem 1rem" }}>
-        <i className="ti ti-check" style={{ fontSize: 32, color: "var(--text-success)" }} aria-hidden="true" />
-        <h2 style={{ marginTop: 12 }}>Submission sent</h2>
-        <p style={{ color: "var(--text-secondary)" }}>The mods will review it before it's added to the bracket.</p>
-        <button onClick={() => { setSent(false); setName(""); setSongs(["", ""]); }} style={{ marginTop: 12 }}>Submit another</button>
+      <div style={{ maxWidth: 460, margin: "4rem auto", textAlign: "center", padding: "0 1rem" }}>
+        <div
+          style={{
+            width: 64,
+            height: 64,
+            margin: "0 auto 20px",
+            borderRadius: "50%",
+            background: "var(--spark)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxShadow: "0 0 0 8px rgba(255,79,126,0.15)",
+          }}
+        >
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--stage-void)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+        </div>
+        <h1 style={{ fontSize: 32 }}>You're entered</h1>
+        <p style={{ marginTop: 10 }}>Your songs are in the queue for review. Keep an eye on stream to see when the bracket drops.</p>
+        <button
+          onClick={() => { setSent(false); setName(""); setSongs(["", ""]); }}
+          style={{ marginTop: 20, background: "transparent", color: "var(--text-secondary)" }}
+        >
+          Submit another entry
+        </button>
       </div>
     );
   }
 
   return (
-    <div style={{ maxWidth: 440, margin: "0 auto" }}>
-      <h1>Submit your songs</h1>
-      <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>Your identity stays hidden from other viewers until results are revealed.</p>
-      <div style={{ background: "var(--bg-accent)", border: "0.5px solid var(--border-accent)", borderRadius: 8, padding: "10px 12px", marginTop: 12 }}>
-        <p style={{ margin: 0, fontSize: 13, color: "var(--text-accent)" }}>
-          Add one song per round you might reach. The order matters: your 1st song plays in your first match, your 2nd song plays if you win that match, and so on. You won't know in advance how many rounds there are, so add as many as you're willing to enter.
+    <div style={{ maxWidth: 480, margin: "0 auto", padding: "1rem 0 3rem" }}>
+      <div style={{ textAlign: "center", marginBottom: 32 }}>
+        <div style={{ fontSize: 13, letterSpacing: "0.04em", color: "var(--spark)", fontWeight: 700, marginBottom: 6 }}>
+          Entry form
+        </div>
+        <h1 style={{ fontSize: 44 }}>Enter your songs</h1>
+        <p style={{ marginTop: 8, maxWidth: 360, marginInline: "auto" }}>
+          Nobody else sees your name or picks until the results are revealed on stream.
         </p>
       </div>
 
-      <label style={{ display: "block", fontSize: 13, color: "var(--text-secondary)", marginTop: 16, marginBottom: 4 }}>Your name</label>
-      <input value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%" }} placeholder="Twitch username" />
+      <div
+        style={{
+          background: "var(--stage-card)",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          padding: 22,
+        }}
+      >
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "12px 14px", background: "rgba(255,205,74,0.08)", border: "1px solid rgba(255,205,74,0.25)", borderRadius: 10, marginBottom: 22 }}>
+          <span style={{ fontSize: 18, lineHeight: 1 }}>♪</span>
+          <p style={{ margin: 0, fontSize: 13.5, color: "var(--gold)" }}>
+            List your songs in the order you'd want them played. Song 1 plays if you're picked for round one — song 2 only plays if you win that round, and so on. Add as many as you're willing to bring.
+          </p>
+        </div>
 
-      <label style={{ display: "block", fontSize: 13, color: "var(--text-secondary)", marginTop: 16, marginBottom: 4 }}>Your songs, in play order</label>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {songs.map((s, i) => (
-          <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 18 }}>{i + 1}.</span>
-            <input
-              value={s}
-              onChange={(e) => updateSong(i, e.target.value)}
-              style={{ flex: 1 }}
-              placeholder="Song title — artist"
-            />
-            {songs.length > 1 && (
-              <button onClick={() => removeSongField(i)} aria-label="Remove song"><i className="ti ti-x" aria-hidden="true" /></button>
-            )}
-          </div>
-        ))}
+        <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>
+          Your name
+        </label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={{ width: "100%" }}
+          placeholder="Twitch username"
+        />
+
+        <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginTop: 20, marginBottom: 6 }}>
+          Your setlist
+        </label>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {songs.map((s, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div
+                style={{
+                  width: 28,
+                  height: 28,
+                  flexShrink: 0,
+                  borderRadius: "50%",
+                  background: "var(--stage-violet-light)",
+                  border: "1px solid var(--border)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: "var(--paper-dim)",
+                }}
+              >
+                {i + 1}
+              </div>
+              <input
+                value={s}
+                onChange={(e) => updateSong(i, e.target.value)}
+                style={{ flex: 1 }}
+                placeholder="Song title — artist"
+              />
+              {songs.length > 1 && (
+                <button
+                  onClick={() => removeSongField(i)}
+                  aria-label="Remove song"
+                  style={{ width: 36, height: 36, padding: 0, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: "var(--text-muted)" }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={addSongField}
+          style={{ marginTop: 12, background: "transparent", color: "var(--spark)", borderColor: "rgba(255,79,126,0.3)", width: "100%" }}
+        >
+          + Add another song
+        </button>
+
+        {err && <p style={{ color: "var(--spark)", fontSize: 13.5, marginTop: 14, marginBottom: 0 }}>{err}</p>}
+
+        <button
+          onClick={submit}
+          style={{
+            marginTop: 20,
+            width: "100%",
+            background: "var(--spark)",
+            color: "var(--stage-void)",
+            fontWeight: 700,
+            fontSize: 16,
+            padding: "13px 16px",
+            border: "none",
+          }}
+        >
+          Enter the contest
+        </button>
       </div>
-      <button onClick={addSongField} style={{ marginTop: 8 }}><i className="ti ti-plus" aria-hidden="true" /> Add another song</button>
-
-      {err && <p style={{ color: "var(--text-danger)", fontSize: 13 }}>{err}</p>}
-      <button onClick={submit} style={{ marginTop: 16, width: "100%", borderColor: "var(--border-accent)", color: "var(--text-accent)" }}>
-        Submit
-      </button>
     </div>
   );
 }
