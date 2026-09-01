@@ -527,7 +527,7 @@ function AdminPanel() {
     advanceEntrantSong(next, match.loser.id);
 
     propagate(next);
-    next = autoResolveByes(next);
+    autoResolveByes(next);
     next.votes = { a: 0, b: 0 };
     next.votingOpen = false;
 
