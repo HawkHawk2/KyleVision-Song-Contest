@@ -4,6 +4,8 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const STATE_KEY = "kv-tournament-v1";
 const SUBS_KEY = "kv-submissions-v1";
 
+import { searchSpotify } from "./spotifyService";
+
 const emptyTournament = () => ({
   id: uid(),
   name: "KyleVision",
