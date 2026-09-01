@@ -257,6 +257,31 @@ async function simpleHash(text) {
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function advanceEntrantSong(t, entrantId) {
+  if (!t || !entrantId || !Array.isArray(t.entrants)) return;
+
+  const entrant = t.entrants.find((e) => e.id === entrantId);
+  if (!entrant) return;
+
+  const used = Number(entrant.songsUsed || 0);
+  const total = Array.isArray(entrant.songs) ? entrant.songs.length : 0;
+
+  // Never advance beyond the number of submitted songs.
+  entrant.songsUsed = Math.min(used + 1, total);
+}
+
+function getViewFromPath() {
+  const path = window.location.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+
+  if (path === 'admin') return 'admin';
+  if (path === 'public') return 'public';
+  if (path === 'overlay') return 'overlay';
+  if (path === 'submit') return 'submit';
+
+  // The root of the site opens the submission page.
+  return 'submit';
+}
+
 function nameFor(entrant, anonymous, label) {
   if (!entrant) return null;
   if (anonymous) return label;
