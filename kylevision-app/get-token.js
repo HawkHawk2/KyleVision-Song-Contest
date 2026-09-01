@@ -1,4 +1,5 @@
-// api/get-token.js
+import { Buffer } from 'buffer';
+
 export default async function handler(req, res) {
   // Allow your frontend to talk to this endpoint
   res.setHeader('Access-Control-Allow-Origin', '*');
