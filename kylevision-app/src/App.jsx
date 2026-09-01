@@ -2,12 +2,13 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
-import { searchSpotify } from "./spotifyService";
 
 const emptyTournament = () => ({
   id: uid(),
   name: "KyleVision",
   status: "setup", // setup | running | done
+  contestNumber: 1,
+  requiredSongs: 3,
   entrants: [], // {id, name, songs: [song1, song2, ...], songsUsed: 0}
   winners: [], // rounds: [ [match,...], [match,...] ]
   losers: [],
@@ -189,15 +190,17 @@ async function sb(path, options = {}) {
 }
 
 async function loadState() {
-  try {
-    const rows = await sb("tournament_state?id=eq.main&select=data");
-    if (rows && rows.length > 0) return rows[0].data;
-    return emptyTournament();
-  } catch (e) {
-    console.error("load failed", e);
-    return emptyTournament();
-  }
+  const rows = await sb("tournament_state?id=eq.main&select=data");
+  const raw = rows?.[0]?.data || emptyTournament();
+
+  return {
+    ...emptyTournament(),
+    ...raw,
+    contestNumber: Number(raw.contestNumber || 1),
+    requiredSongs: Math.max(1, Number(raw.requiredSongs || 3)),
+  };
 }
+
 async function saveState(t) {
   const result = await sb("tournament_state?id=eq.main", {
     method: "PATCH",
@@ -411,7 +414,96 @@ function AdminLock({ onUnlock }) {
   );
 }
 
+
+function AdminContestSettings({ t, onSave }) {
+  const [contestNumber, setContestNumber] = useState(Number(t?.contestNumber || 1));
+  const [requiredSongs, setRequiredSongs] = useState(Math.max(1, Number(t?.requiredSongs || 3)));
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setContestNumber(Number(t?.contestNumber || 1));
+    setRequiredSongs(Math.max(1, Number(t?.requiredSongs || 3)));
+  }, [t?.contestNumber, t?.requiredSongs]);
+
+  const save = async () => {
+    const next = structuredClone(t);
+    next.contestNumber = Math.max(1, Math.floor(Number(contestNumber) || 1));
+    next.requiredSongs = Math.max(1, Math.floor(Number(requiredSongs) || 1));
+
+    try {
+      await onSave(next);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1800);
+    } catch (e) {
+      console.error("Contest settings save failed:", e);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        margin: "16px 0 24px",
+        padding: 18,
+        background: "var(--stage-card)",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius)",
+      }}
+    >
+      <h2 style={{ marginTop: 0 }}>Contest settings</h2>
+      <p style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 4 }}>
+        Changes are saved to Supabase and the public submission page checks for updates every 2 seconds.
+      </p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <label style={{ fontSize: 13, fontWeight: 600 }}>
+          Contest number
+          <input
+            type="number"
+            min="1"
+            value={contestNumber}
+            onChange={(e) => setContestNumber(e.target.value)}
+            style={{ width: "100%", marginTop: 6 }}
+          />
+        </label>
+
+        <label style={{ fontSize: 13, fontWeight: 600 }}>
+          Required songs
+          <input
+            type="number"
+            min="1"
+            value={requiredSongs}
+            onChange={(e) => setRequiredSongs(e.target.value)}
+            style={{ width: "100%", marginTop: 6 }}
+          />
+        </label>
+      </div>
+
+      <button
+        type="button"
+        onClick={save}
+        style={{
+          marginTop: 14,
+          background: "var(--spark)",
+          color: "var(--stage-void)",
+          fontWeight: 700,
+          padding: "10px 14px",
+          border: "none",
+        }}
+      >
+        Save contest settings
+      </button>
+
+      {saved && (
+        <span style={{ marginLeft: 10, fontSize: 13, color: "var(--text-secondary)" }}>
+          Saved — public page updated.
+        </span>
+      )}
+    </div>
+  );
+}
+
 function AdminView() {
+  // Contest settings are rendered in the admin panel below.
   const [unlocked, setUnlocked] = useState(false);
   const [checking, setChecking] = useState(true);
 
@@ -527,7 +619,7 @@ function AdminPanel() {
     advanceEntrantSong(next, match.loser.id);
 
     propagate(next);
-    autoResolveByes(next);
+    next = autoResolveByes(next);
     next.votes = { a: 0, b: 0 };
     next.votingOpen = false;
 
@@ -929,19 +1021,216 @@ function OverlayView() {
   );
 }
 
+function getContestSettings(t) {
+  return {
+    contestNumber: Number(t?.contestNumber || 1),
+    requiredSongs: Math.max(1, Number(t?.requiredSongs || 3)),
+  };
+}
+
+function RulesGate({ settings, onContinue }) {
+  const [accepted, setAccepted] = useState(false);
+
+  return (
+    <div style={{ maxWidth: 620, margin: "3rem auto", textAlign: "center", padding: "0 1rem" }}>
+      <div style={{ color: "var(--spark)", fontWeight: 700, fontSize: 13, letterSpacing: ".06em" }}>
+        KYLEVISION
+      </div>
+      <h1 style={{ fontSize: 42, marginTop: 8 }}>
+        Welcome to KyleVision Song Contest #{settings.contestNumber}
+      </h1>
+
+      <div
+        style={{
+          marginTop: 24,
+          textAlign: "left",
+          background: "var(--stage-card)",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          padding: 24,
+        }}
+      >
+        <h2 style={{ marginTop: 0 }}>Before you enter</h2>
+        <p>
+          Please read the rules before submitting your songs. Entries are reviewed before
+          they can be accepted into the tournament.
+        </p>
+
+        <ul style={{ lineHeight: 1.7, paddingLeft: 22 }}>
+          <li>No troll songs.</li>
+          <li>No anime songs or other entries that aren't suitable for a serious music tournament.</li>
+          <li>Only submit songs you genuinely think belong in the competition.</li>
+          <li>You must enter your Twitch username accurately.</li>
+          <li>Using a fake or misleading Twitch name can result in being banned from future music tournaments.</li>
+          <li>You've been warned: inappropriate or troll submissions may simply be rejected.</li>
+          <li>You must submit exactly <strong>{settings.requiredSongs} song{settings.requiredSongs === 1 ? "" : "s"}</strong>.</li>
+        </ul>
+
+        <label
+          style={{
+            display: "flex",
+            gap: 10,
+            alignItems: "flex-start",
+            marginTop: 22,
+            cursor: "pointer",
+            fontSize: 14,
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={accepted}
+            onChange={(e) => setAccepted(e.target.checked)}
+            style={{ width: 18, height: 18, marginTop: 1 }}
+          />
+          <span>I have read the rules and agree to follow them.</span>
+        </label>
+
+        <button
+          type="button"
+          disabled={!accepted}
+          onClick={onContinue}
+          style={{
+            width: "100%",
+            marginTop: 20,
+            padding: "13px 16px",
+            background: accepted ? "var(--spark)" : "var(--surface-1)",
+            color: accepted ? "var(--stage-void)" : "var(--text-muted)",
+            fontWeight: 700,
+            border: "none",
+          }}
+        >
+          Continue to submission
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SongTextInput({ onAdd, disabled }) {
+  const [song, setSong] = useState("");
+
+  const add = () => {
+    const clean = song.trim();
+    if (!clean || disabled) return;
+    onAdd(clean);
+    setSong("");
+  };
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>
+        Recommend a song
+      </label>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          type="text"
+          value={song}
+          onChange={(e) => setSong(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              add();
+            }
+          }}
+          placeholder="Artist — Song"
+          disabled={disabled}
+          style={{ flex: 1 }}
+        />
+        <button
+          type="button"
+          onClick={add}
+          disabled={disabled || !song.trim()}
+          style={{ padding: "0 16px", fontWeight: 700 }}
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SubmitView() {
+  const [t, setT] = useState(null);
+  const [acceptedRules, setAcceptedRules] = useState(false);
   const [entrantName, setEntrantName] = useState("");
   const [submittedSongs, setSubmittedSongs] = useState([]);
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState("");
 
-  const handleAddSelectedSong = (formattedSongString) => {
-    setSubmittedSongs((prev) => [...prev, formattedSongString]);
+  useEffect(() => {
+    let alive = true;
+
+    const load = async () => {
+      try {
+        const next = await loadState();
+        if (alive) setT(next);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    load();
+
+    // Polling keeps the public form in sync with admin changes without
+    // requiring a page refresh.
+    const timer = setInterval(load, 2000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  if (!t) {
+    return <div style={{ textAlign: "center", padding: "4rem 1rem" }}>Loading contest…</div>;
+  }
+
+  const settings = getContestSettings(t);
+
+  if (!acceptedRules) {
+    return (
+      <RulesGate
+        settings={settings}
+        onContinue={() => setAcceptedRules(true)}
+      />
+    );
+  }
+
+  if (sent) {
+    return (
+      <div style={{ maxWidth: 460, margin: "4rem auto", textAlign: "center", padding: "0 1rem" }}>
+        <h1>Submission received</h1>
+        <p style={{ marginTop: 10 }}>
+          Your entry has been sent for review. Good luck in KyleVision #{settings.contestNumber}!
+        </p>
+        <button
+          onClick={() => {
+            setSent(false);
+            setAcceptedRules(false);
+            setEntrantName("");
+            setSubmittedSongs([]);
+            setErr("");
+          }}
+          style={{ marginTop: 20 }}
+        >
+          Submit another entry
+        </button>
+      </div>
+    );
+  }
+
+  const addSong = (song) => {
+    if (submittedSongs.length >= settings.requiredSongs) {
+      setErr(`You can only submit ${settings.requiredSongs} song${settings.requiredSongs === 1 ? "" : "s"}.`);
+      return;
+    }
+    setSubmittedSongs((prev) => [...prev, song]);
     setErr("");
   };
 
-  const removeSelectedSong = (idx) => {
+  const removeSong = (idx) => {
     setSubmittedSongs((prev) => prev.filter((_, i) => i !== idx));
+    setErr("");
   };
 
   const handleFormSubmit = async (e) => {
@@ -950,73 +1239,38 @@ function SubmitView() {
     const cleanName = entrantName.trim();
     const cleanSongs = submittedSongs.map((s) => s.trim()).filter(Boolean);
 
-    if (!cleanName || cleanSongs.length === 0) {
-      setErr("Enter your name and select at least one song.");
+    if (!cleanName) {
+      setErr("You must enter your Twitch name.");
       return;
     }
 
-    setErr("");
+    if (cleanSongs.length !== settings.requiredSongs) {
+      setErr(`You must select exactly ${settings.requiredSongs} songs.`);
+      return;
+    }
 
     try {
       await addSubmission(cleanName, cleanSongs);
-
       setEntrantName("");
       setSubmittedSongs([]);
+      setErr("");
       setSent(true);
-    } catch (err) {
-      console.error("Submission error:", err);
-      setErr("Couldn't submit right now — try again in a moment.");
+    } catch (e) {
+      console.error("Submission error:", e);
+      setErr("Couldn't submit right now. Please try again.");
     }
   };
 
-  if (sent) {
-    return (
-      <div style={{ maxWidth: 460, margin: "4rem auto", textAlign: "center", padding: "0 1rem" }}>
-        <div
-          style={{
-            width: 64,
-            height: 64,
-            margin: "0 auto 20px",
-            borderRadius: "50%",
-            background: "var(--spark)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            boxShadow: "0 0 0 8px rgba(255,79,126,0.15)",
-          }}
-        >
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--stage-void)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-        </div>
-        <h1 style={{ fontSize: 32 }}>You're entered</h1>
-        <p style={{ marginTop: 10 }}>
-          Your songs are in the queue for review. Keep an eye on stream to see when the bracket drops.
-        </p>
-        <button
-          onClick={() => {
-            setSent(false);
-            setEntrantName("");
-            setSubmittedSongs([]);
-            setErr("");
-          }}
-          style={{ marginTop: 20, background: "transparent", color: "var(--text-secondary)" }}
-        >
-          Submit another entry
-        </button>
-      </div>
-    );
-  }
-
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", padding: "1rem 0 3rem" }}>
-      <div style={{ textAlign: "center", marginBottom: 32 }}>
-        <div style={{ fontSize: 13, letterSpacing: "0.04em", color: "var(--spark)", fontWeight: 700, marginBottom: 6 }}>
-          Entry form
+      <div style={{ textAlign: "center", marginBottom: 28 }}>
+        <div style={{ fontSize: 13, color: "var(--spark)", fontWeight: 700 }}>
+          KYLEVISION SONG CONTEST #{settings.contestNumber}
         </div>
-        <h1 style={{ fontSize: 44 }}>Enter your songs</h1>
-        <p style={{ marginTop: 8, maxWidth: 360, marginInline: "auto" }}>
-          Search Spotify and build your setlist in the exact order you'd want the songs played.
+        <h1 style={{ fontSize: 40 }}>Submit your entry</h1>
+        <p style={{ marginTop: 8 }}>
+          Select exactly <strong>{settings.requiredSongs}</strong> songs.
+          The requirement can be changed by the admin at any time.
         </p>
       </div>
 
@@ -1031,26 +1285,31 @@ function SubmitView() {
       >
         <div style={{ marginBottom: 18 }}>
           <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>
-            Entrant name
+            Twitch username
           </label>
           <input
             type="text"
             value={entrantName}
             onChange={(e) => setEntrantName(e.target.value)}
-            placeholder="Twitch username"
+            placeholder="Your Twitch name"
             required
             style={{ width: "100%" }}
           />
         </div>
 
-        <SpotifySearchInput onSelectSong={handleAddSelectedSong} />
+        <SongTextInput
+          onAdd={addSong}
+          disabled={submittedSongs.length >= settings.requiredSongs}
+        />
 
         <div style={{ marginBottom: 15 }}>
-          <h4 style={{ marginBottom: 8 }}>Selected Songs Queue</h4>
+          <h4 style={{ marginBottom: 8 }}>
+            Selected Songs ({submittedSongs.length}/{settings.requiredSongs})
+          </h4>
 
           {submittedSongs.length === 0 ? (
             <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-              (No tracks selected yet)
+              No songs selected yet.
             </p>
           ) : (
             <ol style={{ paddingLeft: 20, margin: 0 }}>
@@ -1069,13 +1328,11 @@ function SubmitView() {
                   <span>{song}</span>
                   <button
                     type="button"
-                    onClick={() => removeSelectedSong(idx)}
-                    aria-label={`Remove ${song}`}
+                    onClick={() => removeSong(idx)}
                     style={{
                       background: "transparent",
                       color: "var(--text-muted)",
                       padding: "2px 6px",
-                      flexShrink: 0,
                     }}
                   >
                     ✕
@@ -1087,19 +1344,19 @@ function SubmitView() {
         </div>
 
         {err && (
-          <p style={{ color: "var(--spark)", fontSize: 13.5, marginTop: 14, marginBottom: 0 }}>
+          <p style={{ color: "var(--spark)", fontSize: 13.5, marginTop: 14 }}>
             {err}
           </p>
         )}
 
         <button
           type="submit"
-          disabled={!entrantName.trim() || submittedSongs.length === 0}
+          disabled={!entrantName.trim() || submittedSongs.length !== settings.requiredSongs}
           style={{
             marginTop: 20,
             width: "100%",
-            background: "var(--spark)",
-            color: "var(--stage-void)",
+            background: submittedSongs.length === settings.requiredSongs ? "var(--spark)" : "var(--surface-1)",
+            color: submittedSongs.length === settings.requiredSongs ? "var(--stage-void)" : "var(--text-muted)",
             fontWeight: 700,
             fontSize: 16,
             padding: "13px 16px",
@@ -1111,94 +1368,6 @@ function SubmitView() {
       </form>
     </div>
   );
-}
-
-function SpotifySearchInput({ onSelectSong }) {
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState([]);
-  const [loading, setLoading] = useState(false);
-
-  const handleSearch = async (e) => {
-    e.preventDefault();
-    if (!searchQuery.trim()) return;
-    
-    setLoading(true);
-    try {
-      const tracks = await searchSpotify(searchQuery);
-      setSearchResults(Array.isArray(tracks) ? tracks : []);
-    } catch (err) {
-      console.error("Spotify search failed:", err);
-      setSearchResults([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div style={{ marginBottom: '15px', border: '1px solid #333', padding: '15px', borderRadius: '6px' }}>
-      <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>SEARCH TRACK ON SPOTIFY</label>
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Type song name or artist..."
-          style={{ flexGrow: 1, padding: '8px', borderRadius: '4px', border: '1px solid #555', backgroundColor: '#222', color: '#fff' }}
-        />
-        <button type="button" onClick={handleSearch} disabled={loading} style={{ padding: '8px 16px', borderRadius: '4px', cursor: 'pointer' }}>
-          {loading ? "Searching..." : "Search"}
-        </button>
-      </div>
-
-      {searchResults.length > 0 && (
-        <ul style={{ listStyle: 'none', padding: 0, margin: 0, maxHeight: '200px', overflowY: 'auto', border: '1px solid #444' }}>
-          {searchResults.map((track) => {
-            const artistNames = track.artists.map(a => a.name).join(", ");
-            const albumImage = track.album.images[2]?.url || track.album.images[0]?.url || "";
-            
-            return (
-              <li 
-                key={track.id} 
-                onClick={() => {
-                  // Format selection neatly for the tournament state array
-                  onSelectSong(`${track.name} - ${artistNames}`);
-                  setSearchResults([]);
-                  setSearchQuery("");
-                }}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '10px',
-                  padding: '8px',
-                  borderBottom: '1px solid #333',
-                  cursor: 'pointer',
-                  backgroundColor: '#1c1c1c'
-                }}
-                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#2a2a2a'}
-                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#1c1c1c'}
-              >
-                {albumImage && <img src={albumImage} alt="" style={{ width: '32px', height: '32px', borderRadius: '4px' }} />}
-                <div>
-                  <div style={{ fontWeight: 'bold', color: '#fff' }}>{track.name}</div>
-                  <div style={{ fontSize: '12px', color: '#aaa' }}>{artistNames}</div>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-
-function getViewFromPath() {
-  const path = window.location.pathname.replace(/^\/+|\/+$/g, "").toLowerCase();
-  if (["admin", "public", "overlay", "submit"].includes(path)) return path;
-  const params = new URLSearchParams(window.location.search);
-  const q = params.get("view");
-  if (["admin", "public", "overlay", "submit"].includes(q)) return q;
-  return "admin";
 }
 
 export default function App() {
