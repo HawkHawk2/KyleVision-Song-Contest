@@ -1076,6 +1076,79 @@ function SubmitView() {
   );
 }
 
+function SpotifySearchInput({ onSelectSong }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    if (!searchQuery.trim()) return;
+    
+    setLoading(true);
+    const tracks = await searchSpotify(searchQuery);
+    setSearchResults(tracks || []);
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ marginBottom: '15px', border: '1px solid #333', padding: '15px', borderRadius: '6px' }}>
+      <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold' }}>SEARCH TRACK ON SPOTIFY</label>
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Type song name or artist..."
+          style={{ flexGrow: 1, padding: '8px', borderRadius: '4px', border: '1px solid #555', backgroundColor: '#222', color: '#fff' }}
+        />
+        <button type="button" onClick={handleSearch} disabled={loading} style={{ padding: '8px 16px', borderRadius: '4px', cursor: 'pointer' }}>
+          {loading ? "Searching..." : "Search"}
+        </button>
+      </div>
+
+      {searchResults.length > 0 && (
+        <ul style={{ listStyle: 'none', padding: 0, margin: 0, maxHeight: '200px', overflowY: 'auto', border: '1px solid #444' }}>
+          {searchResults.map((track) => {
+            const artistNames = track.artists.map(a => a.name).join(", ");
+            const albumImage = track.album.images[2]?.url || track.album.images[0]?.url || "";
+            
+            return (
+              <li 
+                key={track.id} 
+                onClick={() => {
+                  // Format selection neatly for the tournament state array
+                  onSelectSong(`${track.name} - ${artistNames}`);
+                  setSearchResults([]);
+                  setSearchQuery("");
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  padding: '8px',
+                  borderBottom: '1px solid #333',
+                  cursor: 'pointer',
+                  backgroundColor: '#1c1c1c'
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#2a2a2a'}
+                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#1c1c1c'}
+              >
+                {albumImage && <img src={albumImage} alt="" style={{ width: '32px', height: '32px', borderRadius: '4px' }} />}
+                <div>
+                  <div style={{ fontWeight: 'bold', color: '#fff' }}>{track.name}</div>
+                  <div style={{ fontSize: '12px', color: '#aaa' }}>{artistNames}</div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+
 function getViewFromPath() {
   const path = window.location.pathname.replace(/^\/+|\/+$/g, "").toLowerCase();
   if (["admin", "public", "overlay", "submit"].includes(path)) return path;
