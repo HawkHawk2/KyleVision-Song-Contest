@@ -1,7 +1,6 @@
-import { Buffer } from 'buffer';
+import { Buffer } from 'buffer'; // 🛠️ FIX 1: Add this required import
 
 export default async function handler(req, res) {
-  // Allow your frontend to talk to this endpoint
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -10,17 +9,14 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  // LEAVE THESE ALONE - Vercel will handle filling these in safely!
   const clientId = process.env.SPOTIFY_CLIENT_ID;
   const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
 
   try {
-    // ⚠️ FIXED URL: Changed from 'https://spotify.com' to the accounts token endpoint
     const tokenResponse = await fetch('https://spotify.com', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        // This converts the hidden variables into the layout format Spotify requires
         'Authorization': 'Basic ' + Buffer.from(clientId + ':' + clientSecret).toString('base64'),
       },
       body: 'grant_type=client_credentials',
