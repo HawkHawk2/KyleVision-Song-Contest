@@ -1,8 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 const uid = () => Math.random().toString(36).slice(2, 10);
-const STATE_KEY = "kv-tournament-v1";
-const SUBS_KEY = "kv-submissions-v1";
 
 import { searchSpotify } from "./spotifyService";
 
@@ -24,7 +22,9 @@ const emptyTournament = () => ({
 // and move on to the next match, so each round consumes the next song in
 // the order they submitted them.
 function currentSongFor(entrant) {
-  if (!entrant) return null;
+  if (!entrant || !Array.isArray(entrant.songs) || entrant.songs.length === 0) {
+    return "(no song)";
+  }
   const idx = Math.min(entrant.songsUsed || 0, entrant.songs.length - 1);
   return entrant.songs[idx] || entrant.songs[entrant.songs.length - 1] || "(no song)";
 }
@@ -199,14 +199,11 @@ async function loadState() {
   }
 }
 async function saveState(t) {
-  try {
-    await sb("tournament_state?id=eq.main", {
-      method: "PATCH",
-      body: JSON.stringify({ data: t }),
-    });
-  } catch (e) {
-    console.error("save failed", e);
-  }
+  const result = await sb("tournament_state?id=eq.main", {
+    method: "PATCH",
+    body: JSON.stringify({ data: t }),
+  });
+  return result;
 }
 async function loadSubs() {
   try {
@@ -268,11 +265,8 @@ function nameFor(entrant, anonymous, label) {
 function MatchCard({ m, label, anonymous, onPick, editable }) {
   const isDone = !!m.winner;
   const pick = (side) => {
-    if (!editable) return;
+    if (!editable || m.winner || !m.a || !m.b) return;
     const chosen = side === "a" ? m.a : m.b;
-    if (!chosen || (m.a && m.b == null) || (m.b && m.a == null)) {
-      // allow picking even with a bye present, guard below handles null
-    }
     if (!chosen) return;
     onPick(chosen);
   };
@@ -368,9 +362,14 @@ function AdminLock({ onUnlock }) {
       return;
     }
     const hash = await simpleHash(pw);
-    await setAdminPassword(hash);
-    localStorage.setItem(ADMIN_SESSION_KEY, hash);
-    onUnlock();
+    try {
+      await setAdminPassword(hash);
+      localStorage.setItem(ADMIN_SESSION_KEY, hash);
+      onUnlock();
+    } catch (e) {
+      console.error("Failed to save admin password:", e);
+      setErr("Couldn't save the password. Check the database connection and try again.");
+    }
   };
 
   const submitLogin = async () => {
@@ -514,27 +513,50 @@ function AdminPanel() {
   const pickWinner = (bracketName, ri, mi, winner) => {
     const next = structuredClone(t);
     const bracket = bracketName === "losers" ? next.losers : next.winners;
+    const match = bracket?.[ri]?.[mi];
 
-    // the match card should keep showing the song they just played
-    bracket[ri][mi].winner = winner;
+    if (!match || match.winner || !match.a || !match.b) return;
+    if (winner.id !== match.a.id && winner.id !== match.b.id) return;
 
-    // bump the winner's song count on the master entrant record so future
-    // rounds pull their next song
-    const masterIdx = next.entrants.findIndex((e) => e.id === winner.id);
-    if (masterIdx !== -1) {
-      next.entrants[masterIdx] = { ...next.entrants[masterIdx], songsUsed: (next.entrants[masterIdx].songsUsed || 0) + 1 };
-    }
+    match.winner = { ...winner };
+    match.loser = winner.id === match.a.id ? { ...match.b } : { ...match.a };
+
+    // A song is consumed when the entrant finishes a match, regardless of
+    // whether they won or lost. This keeps the next-round song aligned.
+    advanceEntrantSong(next, match.winner.id);
+    advanceEntrantSong(next, match.loser.id);
 
     propagate(next);
+    next = autoResolveByes(next);
     next.votes = { a: 0, b: 0 };
     next.votingOpen = false;
-    persist(next);
+
+    try {
+      persist(next);
+    } catch (e) {
+      console.error("Failed to persist winner:", e);
+    }
   };
 
   const pickGrandFinalWinner = (entrant) => {
+    if (!t.grandFinal || t.grandFinal.winner || !entrant) return;
+    if (!t.grandFinal.a || !t.grandFinal.b) return;
+    if (entrant.id !== t.grandFinal.a.id && entrant.id !== t.grandFinal.b.id) return;
+
     const next = structuredClone(t);
-    next.grandFinal.winner = entrant;
+    next.grandFinal.winner = { ...entrant };
+
+    const loser = entrant.id === next.grandFinal.a.id
+      ? next.grandFinal.b
+      : next.grandFinal.a;
+
+    advanceEntrantSong(next, entrant.id);
+    if (loser) advanceEntrantSong(next, loser.id);
+
     next.status = "done";
+    next.votingOpen = false;
+    next.votes = { a: 0, b: 0 };
+
     persist(next);
   };
 
@@ -850,7 +872,7 @@ function PublicView() {
 
       {t.status !== "setup" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-          <BracketColumn title="Winners bracket" rounds={t.winners} anonymous editable={false} onPick={() => {}} labelPrefix="W" />
+          <BracketColumn title="Winners bracket" rounds={t.winners} anonymous={false} editable={false} onPick={() => {}} labelPrefix="W" />
           {t.losers.length > 0 && (
             <BracketColumn title="Losers bracket" rounds={t.losers} anonymous editable={false} onPick={() => {}} labelPrefix="L" />
           )}
@@ -908,31 +930,42 @@ function OverlayView() {
 }
 
 function SubmitView() {
-  const [name, setName] = useState("");
-  const [songs, setSongs] = useState(["", ""]);
+  const [entrantName, setEntrantName] = useState("");
+  const [submittedSongs, setSubmittedSongs] = useState([]);
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState("");
 
-  const updateSong = (i, val) => {
-    const next = [...songs];
-    next[i] = val;
-    setSongs(next);
+  const handleAddSelectedSong = (formattedSongString) => {
+    setSubmittedSongs((prev) => [...prev, formattedSongString]);
+    setErr("");
   };
-  const addSongField = () => setSongs([...songs, ""]);
-  const removeSongField = (i) => setSongs(songs.filter((_, idx) => idx !== i));
 
-  const submit = async () => {
-    const cleaned = songs.map((s) => s.trim()).filter(Boolean);
-    if (!name.trim() || cleaned.length === 0) {
-      setErr("Enter your name and at least one song");
+  const removeSelectedSong = (idx) => {
+    setSubmittedSongs((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleFormSubmit = async (e) => {
+    e.preventDefault();
+
+    const cleanName = entrantName.trim();
+    const cleanSongs = submittedSongs.map((s) => s.trim()).filter(Boolean);
+
+    if (!cleanName || cleanSongs.length === 0) {
+      setErr("Enter your name and select at least one song.");
       return;
     }
+
     setErr("");
+
     try {
-      await addSubmission(name.trim(), cleaned);
+      await addSubmission(cleanName, cleanSongs);
+
+      setEntrantName("");
+      setSubmittedSongs([]);
       setSent(true);
-    } catch (e) {
-      setErr("Couldn't submit right now — try again in a moment");
+    } catch (err) {
+      console.error("Submission error:", err);
+      setErr("Couldn't submit right now — try again in a moment.");
     }
   };
 
@@ -957,9 +990,16 @@ function SubmitView() {
           </svg>
         </div>
         <h1 style={{ fontSize: 32 }}>You're entered</h1>
-        <p style={{ marginTop: 10 }}>Your songs are in the queue for review. Keep an eye on stream to see when the bracket drops.</p>
+        <p style={{ marginTop: 10 }}>
+          Your songs are in the queue for review. Keep an eye on stream to see when the bracket drops.
+        </p>
         <button
-          onClick={() => { setSent(false); setName(""); setSongs(["", ""]); }}
+          onClick={() => {
+            setSent(false);
+            setEntrantName("");
+            setSubmittedSongs([]);
+            setErr("");
+          }}
           style={{ marginTop: 20, background: "transparent", color: "var(--text-secondary)" }}
         >
           Submit another entry
@@ -976,11 +1016,12 @@ function SubmitView() {
         </div>
         <h1 style={{ fontSize: 44 }}>Enter your songs</h1>
         <p style={{ marginTop: 8, maxWidth: 360, marginInline: "auto" }}>
-          Nobody else sees your name or picks until the results are revealed on stream.
+          Search Spotify and build your setlist in the exact order you'd want the songs played.
         </p>
       </div>
 
-      <div
+      <form
+        onSubmit={handleFormSubmit}
         style={{
           background: "var(--stage-card)",
           border: "1px solid var(--border)",
@@ -988,76 +1029,72 @@ function SubmitView() {
           padding: 22,
         }}
       >
-        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "12px 14px", background: "rgba(255,205,74,0.08)", border: "1px solid rgba(255,205,74,0.25)", borderRadius: 10, marginBottom: 22 }}>
-          <span style={{ fontSize: 18, lineHeight: 1 }}>♪</span>
-          <p style={{ margin: 0, fontSize: 13.5, color: "var(--gold)" }}>
-            List your songs in the order you'd want them played. Song 1 plays if you're picked for round one — song 2 only plays if you win that round, and so on. Add as many as you're willing to bring.
-          </p>
+        <div style={{ marginBottom: 18 }}>
+          <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>
+            Entrant name
+          </label>
+          <input
+            type="text"
+            value={entrantName}
+            onChange={(e) => setEntrantName(e.target.value)}
+            placeholder="Twitch username"
+            required
+            style={{ width: "100%" }}
+          />
         </div>
 
-        <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 6 }}>
-          Your name
-        </label>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          style={{ width: "100%" }}
-          placeholder="Twitch username"
-        />
+        <SpotifySearchInput onSelectSong={handleAddSelectedSong} />
 
-        <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginTop: 20, marginBottom: 6 }}>
-          Your setlist
-        </label>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {songs.map((s, i) => (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <div
-                style={{
-                  width: 28,
-                  height: 28,
-                  flexShrink: 0,
-                  borderRadius: "50%",
-                  background: "var(--stage-violet-light)",
-                  border: "1px solid var(--border)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  color: "var(--paper-dim)",
-                }}
-              >
-                {i + 1}
-              </div>
-              <input
-                value={s}
-                onChange={(e) => updateSong(i, e.target.value)}
-                style={{ flex: 1 }}
-                placeholder="Song title — artist"
-              />
-              {songs.length > 1 && (
-                <button
-                  onClick={() => removeSongField(i)}
-                  aria-label="Remove song"
-                  style={{ width: 36, height: 36, padding: 0, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: "var(--text-muted)" }}
+        <div style={{ marginBottom: 15 }}>
+          <h4 style={{ marginBottom: 8 }}>Selected Songs Queue</h4>
+
+          {submittedSongs.length === 0 ? (
+            <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+              (No tracks selected yet)
+            </p>
+          ) : (
+            <ol style={{ paddingLeft: 20, margin: 0 }}>
+              {submittedSongs.map((song, idx) => (
+                <li
+                  key={`${song}-${idx}`}
+                  style={{
+                    margin: "6px 0",
+                    fontSize: 14,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    alignItems: "center",
+                  }}
                 >
-                  ✕
-                </button>
-              )}
-            </div>
-          ))}
+                  <span>{song}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeSelectedSong(idx)}
+                    aria-label={`Remove ${song}`}
+                    style={{
+                      background: "transparent",
+                      color: "var(--text-muted)",
+                      padding: "2px 6px",
+                      flexShrink: 0,
+                    }}
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
-        <button
-          onClick={addSongField}
-          style={{ marginTop: 12, background: "transparent", color: "var(--spark)", borderColor: "rgba(255,79,126,0.3)", width: "100%" }}
-        >
-          + Add another song
-        </button>
 
-        {err && <p style={{ color: "var(--spark)", fontSize: 13.5, marginTop: 14, marginBottom: 0 }}>{err}</p>}
+        {err && (
+          <p style={{ color: "var(--spark)", fontSize: 13.5, marginTop: 14, marginBottom: 0 }}>
+            {err}
+          </p>
+        )}
 
         <button
-          onClick={submit}
+          type="submit"
+          disabled={!entrantName.trim() || submittedSongs.length === 0}
           style={{
             marginTop: 20,
             width: "100%",
@@ -1069,9 +1106,9 @@ function SubmitView() {
             border: "none",
           }}
         >
-          Enter the contest
+          Submit to Bracket Queue
         </button>
-      </div>
+      </form>
     </div>
   );
 }
@@ -1086,9 +1123,15 @@ function SpotifySearchInput({ onSelectSong }) {
     if (!searchQuery.trim()) return;
     
     setLoading(true);
-    const tracks = await searchSpotify(searchQuery);
-    setSearchResults(tracks || []);
-    setLoading(false);
+    try {
+      const tracks = await searchSpotify(searchQuery);
+      setSearchResults(Array.isArray(tracks) ? tracks : []);
+    } catch (err) {
+      console.error("Spotify search failed:", err);
+      setSearchResults([]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -1163,6 +1206,12 @@ export default function App() {
   const [view, setView] = useState(initial);
   const isDedicatedRoute = window.location.pathname.replace(/^\/+|\/+$/g, "") !== "";
 
+  useEffect(() => {
+    const onPopState = () => setView(getViewFromPath());
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   const goTo = (v) => {
     setView(v);
     window.history.pushState({}, "", `/${v}`);
@@ -1193,6 +1242,7 @@ export default function App() {
           ))}
         </div>
       )}
+
       {view === "admin" && <AdminView />}
       {view === "public" && <PublicView />}
       {view === "overlay" && <OverlayView />}
