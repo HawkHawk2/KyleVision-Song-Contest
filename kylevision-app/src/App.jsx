@@ -17,7 +17,7 @@ const emptyTournament = () => ({
   grandFinal: null, // match
   votingOpen: false,
   votes: { a: 0, b: 0 },
-  activeMatchPath: null, // {bracket:'awinners'|'losers'|'final', round, index}
+  activeMatchPath: null, // {bracket:'winners'|'losers'|'final', round, index}
 });
 
 // The song an entrant plays for a given match is songs[songsUsed], taken at
@@ -508,29 +508,83 @@ function AdminContestSettings({ t, onSave }) {
 
         <label style={{ fontSize: 13, fontWeight: 600 }}>
           Minimum songs
-          <input
-            type="number"
-            min="1"
-            value={minSongs}
-            onChange={(e) => {
-              const value = e.target.value;
-              setMinSongs(value);
-              const numeric = Math.max(1, Math.floor(Number(value) || 1));
-              if (Number(maxSongs) < numeric) setMaxSongs(numeric);
-            }}
-            style={{ width: "100%", marginTop: 6 }}
-          />
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <button
+              type="button"
+              onClick={() => {
+                const next = Math.max(1, Number(minSongs) - 1);
+                setMinSongs(next);
+                if (Number(maxSongs) < next) setMaxSongs(next);
+              }}
+              style={{ padding: "8px 12px" }}
+              aria-label="Decrease minimum songs"
+            >
+              −
+            </button>
+            <input
+              type="number"
+              min="1"
+              value={minSongs}
+              onChange={(e) => {
+                const value = e.target.value;
+                setMinSongs(value);
+                const numeric = Math.max(1, Math.floor(Number(value) || 1));
+                if (Number(maxSongs) < numeric) setMaxSongs(numeric);
+              }}
+              style={{ width: "100%", marginTop: 0 }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const next = Math.max(1, Number(minSongs) + 1);
+                setMinSongs(next);
+                if (Number(maxSongs) < next) setMaxSongs(next);
+              }}
+              style={{ padding: "8px 12px" }}
+              aria-label="Increase minimum songs"
+            >
+              +
+            </button>
+          </div>
         </label>
 
         <label style={{ fontSize: 13, fontWeight: 600 }}>
           Maximum songs
-          <input
-            type="number"
-            min={Math.max(1, Number(minSongs) || 1)}
-            value={maxSongs}
-            onChange={(e) => setMaxSongs(e.target.value)}
-            style={{ width: "100%", marginTop: 6 }}
-          />
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <button
+              type="button"
+              onClick={() => {
+                const min = Math.max(1, Number(minSongs) || 1);
+                setMaxSongs(Math.max(min, Number(maxSongs) - 1));
+              }}
+              style={{ padding: "8px 12px" }}
+              aria-label="Decrease maximum songs"
+            >
+              −
+            </button>
+            <input
+              type="number"
+              min={Math.max(1, Number(minSongs) || 1)}
+              value={maxSongs}
+              onChange={(e) => {
+                const min = Math.max(1, Number(minSongs) || 1);
+                const value = Math.max(min, Math.floor(Number(e.target.value) || min));
+                setMaxSongs(value);
+              }}
+              style={{ width: "100%", marginTop: 0 }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const min = Math.max(1, Number(minSongs) || 1);
+                setMaxSongs(Math.max(min, Number(maxSongs) + 1));
+              }}
+              style={{ padding: "8px 12px" }}
+              aria-label="Increase maximum songs"
+            >
+              +
+            </button>
+          </div>
         </label>
       </div>
 
@@ -1142,8 +1196,8 @@ function RulesGate({ settings, onContinue }) {
             You must submit between <strong>{settings.minSongs} and {settings.maxSongs} songs</strong>.
           </li>
           <li>
-            If you submit fewer songs than are needed to get through the tournament, your older
-            submitted songs will be replayed again in the same order you entered them.
+            If you request fewer songs than are needed to get through the tournament,
+            your old songs will be replayed in the same order you submitted them.
           </li>
         </ul>
 
@@ -1350,10 +1404,12 @@ function SubmitView() {
         </div>
         <h1 style={{ fontSize: 40 }}>Submit your entry</h1>
         <p style={{ marginTop: 8 }}>
-          Select between <strong>{settings.minSongs}</strong> and{" "}
+          You can request between <strong>{settings.minSongs}</strong> and{" "}
           <strong>{settings.maxSongs}</strong> songs.
-          The range can be changed by the admin at any time. If your songs run out during
-          the tournament, your older songs will be replayed again in the same order you entered them.
+        </p>
+        <p style={{ marginTop: 8, fontSize: 13.5, color: "var(--text-secondary)" }}>
+          If you request fewer songs than are needed to get through the tournament,
+          your old songs will be replayed in the same order you submitted them.
         </p>
       </div>
 
@@ -1442,16 +1498,14 @@ function SubmitView() {
           style={{
             marginTop: 20,
             width: "100%",
-            background={
+            background:
               submittedSongs.length >= settings.minSongs && submittedSongs.length <= settings.maxSongs
                 ? "var(--spark)"
-                : "var(--surface-1)"
-            },
-            color={
+                : "var(--surface-1)",
+            color:
               submittedSongs.length >= settings.minSongs && submittedSongs.length <= settings.maxSongs
                 ? "var(--stage-void)"
-                : "var(--text-muted)"
-            },
+                : "var(--text-muted)",
             fontWeight: 700,
             fontSize: 16,
             padding: "13px 16px",
