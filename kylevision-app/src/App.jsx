@@ -259,11 +259,27 @@ async function simpleHash(text) {
 
 function advanceEntrantSong(t, entrantId) {
   if (!t || !entrantId || !Array.isArray(t.entrants)) return;
+
   const entrant = t.entrants.find((e) => e.id === entrantId);
-  if (!entrant || !Array.isArray(entrant.songs) || entrant.songs.length === 0) return;
+  if (!entrant) return;
 
   const used = Number(entrant.songsUsed || 0);
-  entrant.songsUsed = Math.min(used + 1, entrant.songs.length);
+  const total = Array.isArray(entrant.songs) ? entrant.songs.length : 0;
+
+  // Never advance beyond the number of submitted songs.
+  entrant.songsUsed = Math.min(used + 1, total);
+}
+
+function getViewFromPath() {
+  const path = window.location.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+
+  if (path === 'admin') return 'admin';
+  if (path === 'public') return 'public';
+  if (path === 'overlay') return 'overlay';
+  if (path === 'submit') return 'submit';
+
+  // The root of the site opens the submission page.
+  return 'submit';
 }
 
 function nameFor(entrant, anonymous, label) {
@@ -725,8 +741,6 @@ function AdminPanel() {
 
       {tab === "setup" && (
         <div>
-          <AdminContestSettings t={t} onSave={persist} />
-
           <div style={{ marginBottom: 28 }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
               <h2 style={{ fontSize: 20 }}>Queue</h2>
@@ -1379,18 +1393,6 @@ function SubmitView() {
       </form>
     </div>
   );
-}
-
-function getViewFromPath() {
-  const path = window.location.pathname.replace(/^\/+|\/+$/g, "").toLowerCase();
-
-  if (path === "admin") return "admin";
-  if (path === "public") return "public";
-  if (path === "overlay") return "overlay";
-  if (path === "submit") return "submit";
-
-  // The root URL is the public submission page.
-  return "submit";
 }
 
 export default function App() {
