@@ -17,7 +17,7 @@ const emptyTournament = () => ({
   grandFinal: null, // match
   votingOpen: false,
   votes: { a: 0, b: 0 },
-  activeMatchPath: null, // {bracket:'winners'|'losers'|'final', round, index}
+  activeMatchPath: null, // {bracket:'awinners'|'losers'|'final', round, index}
 });
 
 // The song an entrant plays for a given match is songs[songsUsed], taken at
