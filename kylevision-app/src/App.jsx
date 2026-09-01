@@ -8,7 +8,9 @@ const emptyTournament = () => ({
   name: "KyleVision",
   status: "setup", // setup | running | done
   contestNumber: 1,
-  requiredSongs: 3,
+  requiredSongs: 3, // kept for backwards compatibility; min/max below control submissions
+  minSongs: 3,
+  maxSongs: 3,
   entrants: [], // {id, name, songs: [song1, song2, ...], songsUsed: 0}
   winners: [], // rounds: [ [match,...], [match,...] ]
   losers: [],
@@ -26,8 +28,8 @@ function currentSongFor(entrant) {
   if (!entrant || !Array.isArray(entrant.songs) || entrant.songs.length === 0) {
     return "(no song)";
   }
-  const idx = Math.min(entrant.songsUsed || 0, entrant.songs.length - 1);
-  return entrant.songs[idx] || entrant.songs[entrant.songs.length - 1] || "(no song)";
+  const idx = (Number(entrant.songsUsed || 0)) % entrant.songs.length;
+  return entrant.songs[idx] || entrant.songs[0] || "(no song)";
 }
 function hasSongLeft(entrant) {
   if (!entrant) return true;
@@ -197,7 +199,12 @@ async function loadState() {
     ...emptyTournament(),
     ...raw,
     contestNumber: Number(raw.contestNumber || 1),
-    requiredSongs: Math.max(1, Number(raw.requiredSongs || 3)),
+    requiredSongs: Math.max(1, Number(raw.requiredSongs || raw.minSongs || 3)),
+    minSongs: Math.max(1, Number(raw.minSongs || raw.requiredSongs || 3)),
+    maxSongs: Math.max(
+      Math.max(1, Number(raw.minSongs || raw.requiredSongs || 3)),
+      Number(raw.maxSongs || raw.requiredSongs || 3)
+    ),
   };
 }
 
@@ -285,7 +292,7 @@ function MatchCard({ m, label, anonymous, onPick, editable }) {
   const row = (side, entrant) => {
     const won = isDone && entrant && m.winner.id === entrant.id;
     const lost = isDone && entrant && m.winner.id !== entrant.id;
-    const outOfSongs = entrant && !anonymous && !hasSongLeft(entrant);
+    const outOfSongs = false; // Songs automatically replay in submission order when exhausted.
     return (
       <div
         onClick={() => pick(side)}
@@ -426,25 +433,49 @@ function AdminLock({ onUnlock }) {
 
 function AdminContestSettings({ t, onSave }) {
   const [contestNumber, setContestNumber] = useState(Number(t?.contestNumber || 1));
-  const [requiredSongs, setRequiredSongs] = useState(Math.max(1, Number(t?.requiredSongs || 3)));
+  const [minSongs, setMinSongs] = useState(
+    Math.max(1, Number(t?.minSongs || t?.requiredSongs || 3))
+  );
+  const [maxSongs, setMaxSongs] = useState(
+    Math.max(
+      Math.max(1, Number(t?.minSongs || t?.requiredSongs || 3)),
+      Number(t?.maxSongs || t?.requiredSongs || 3)
+    )
+  );
   const [saved, setSaved] = useState(false);
+  const [settingsErr, setSettingsErr] = useState("");
 
   useEffect(() => {
+    const min = Math.max(1, Number(t?.minSongs || t?.requiredSongs || 3));
+    const max = Math.max(min, Number(t?.maxSongs || t?.requiredSongs || 3));
+
     setContestNumber(Number(t?.contestNumber || 1));
-    setRequiredSongs(Math.max(1, Number(t?.requiredSongs || 3)));
-  }, [t?.contestNumber, t?.requiredSongs]);
+    setMinSongs(min);
+    setMaxSongs(max);
+  }, [t?.contestNumber, t?.minSongs, t?.maxSongs, t?.requiredSongs]);
 
   const save = async () => {
+    const cleanMin = Math.max(1, Math.floor(Number(minSongs) || 1));
+    const cleanMax = Math.max(cleanMin, Math.floor(Number(maxSongs) || cleanMin));
+
+    setSettingsErr("");
+
     const next = structuredClone(t);
     next.contestNumber = Math.max(1, Math.floor(Number(contestNumber) || 1));
-    next.requiredSongs = Math.max(1, Math.floor(Number(requiredSongs) || 1));
+    next.minSongs = cleanMin;
+    next.maxSongs = cleanMax;
+    // Keep the old field in sync for compatibility with older saved state.
+    next.requiredSongs = cleanMin;
 
     try {
       await onSave(next);
+      setMinSongs(cleanMin);
+      setMaxSongs(cleanMax);
       setSaved(true);
       setTimeout(() => setSaved(false), 1800);
     } catch (e) {
       console.error("Contest settings save failed:", e);
+      setSettingsErr("Couldn't save the contest settings.");
     }
   };
 
@@ -463,7 +494,7 @@ function AdminContestSettings({ t, onSave }) {
         Changes are saved to Supabase and the public submission page checks for updates every 2 seconds.
       </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
         <label style={{ fontSize: 13, fontWeight: 600 }}>
           Contest number
           <input
@@ -476,16 +507,42 @@ function AdminContestSettings({ t, onSave }) {
         </label>
 
         <label style={{ fontSize: 13, fontWeight: 600 }}>
-          Required songs
+          Minimum songs
           <input
             type="number"
             min="1"
-            value={requiredSongs}
-            onChange={(e) => setRequiredSongs(e.target.value)}
+            value={minSongs}
+            onChange={(e) => {
+              const value = e.target.value;
+              setMinSongs(value);
+              const numeric = Math.max(1, Math.floor(Number(value) || 1));
+              if (Number(maxSongs) < numeric) setMaxSongs(numeric);
+            }}
+            style={{ width: "100%", marginTop: 6 }}
+          />
+        </label>
+
+        <label style={{ fontSize: 13, fontWeight: 600 }}>
+          Maximum songs
+          <input
+            type="number"
+            min={Math.max(1, Number(minSongs) || 1)}
+            value={maxSongs}
+            onChange={(e) => setMaxSongs(e.target.value)}
             style={{ width: "100%", marginTop: 6 }}
           />
         </label>
       </div>
+
+      <p style={{ color: "var(--text-secondary)", fontSize: 13, margin: "10px 0 0" }}>
+        Viewers can submit between <strong>{Math.max(1, Number(minSongs) || 1)}</strong> and{" "}
+        <strong>{Math.max(Math.max(1, Number(minSongs) || 1), Number(maxSongs) || 1)}</strong> songs.
+        If they run out during the tournament, their submitted songs replay again in the same order.
+      </p>
+
+      {settingsErr && (
+        <p style={{ color: "var(--text-danger)", fontSize: 13 }}>{settingsErr}</p>
+      )}
 
       <button
         type="button"
@@ -1033,9 +1090,16 @@ function OverlayView() {
 }
 
 function getContestSettings(t) {
+  const minSongs = Math.max(1, Number(t?.minSongs || t?.requiredSongs || 3));
+  const maxSongs = Math.max(
+    minSongs,
+    Number(t?.maxSongs || t?.requiredSongs || minSongs)
+  );
+
   return {
     contestNumber: Number(t?.contestNumber || 1),
-    requiredSongs: Math.max(1, Number(t?.requiredSongs || 3)),
+    minSongs,
+    maxSongs,
   };
 }
 
@@ -1074,7 +1138,13 @@ function RulesGate({ settings, onContinue }) {
           <li>You must enter your Twitch username accurately.</li>
           <li>Using a fake or misleading Twitch name can result in being banned from future music tournaments.</li>
           <li>You've been warned: inappropriate or troll submissions may simply be rejected.</li>
-          <li>You must submit exactly <strong>{settings.requiredSongs} song{settings.requiredSongs === 1 ? "" : "s"}</strong>.</li>
+          <li>
+            You must submit between <strong>{settings.minSongs} and {settings.maxSongs} songs</strong>.
+          </li>
+          <li>
+            If you submit fewer songs than are needed to get through the tournament, your older
+            submitted songs will be replayed again in the same order you entered them.
+          </li>
         </ul>
 
         <label
@@ -1231,8 +1301,8 @@ function SubmitView() {
   }
 
   const addSong = (song) => {
-    if (submittedSongs.length >= settings.requiredSongs) {
-      setErr(`You can only submit ${settings.requiredSongs} song${settings.requiredSongs === 1 ? "" : "s"}.`);
+    if (submittedSongs.length >= settings.maxSongs) {
+      setErr(`You can only submit up to ${settings.maxSongs} songs.`);
       return;
     }
     setSubmittedSongs((prev) => [...prev, song]);
@@ -1255,8 +1325,8 @@ function SubmitView() {
       return;
     }
 
-    if (cleanSongs.length !== settings.requiredSongs) {
-      setErr(`You must select exactly ${settings.requiredSongs} songs.`);
+    if (cleanSongs.length < settings.minSongs || cleanSongs.length > settings.maxSongs) {
+      setErr(`You must select between ${settings.minSongs} and ${settings.maxSongs} songs.`);
       return;
     }
 
@@ -1280,8 +1350,10 @@ function SubmitView() {
         </div>
         <h1 style={{ fontSize: 40 }}>Submit your entry</h1>
         <p style={{ marginTop: 8 }}>
-          Select exactly <strong>{settings.requiredSongs}</strong> songs.
-          The requirement can be changed by the admin at any time.
+          Select between <strong>{settings.minSongs}</strong> and{" "}
+          <strong>{settings.maxSongs}</strong> songs.
+          The range can be changed by the admin at any time. If your songs run out during
+          the tournament, your older songs will be replayed again in the same order you entered them.
         </p>
       </div>
 
@@ -1310,12 +1382,12 @@ function SubmitView() {
 
         <SongTextInput
           onAdd={addSong}
-          disabled={submittedSongs.length >= settings.requiredSongs}
+          disabled={submittedSongs.length >= settings.maxSongs}
         />
 
         <div style={{ marginBottom: 15 }}>
           <h4 style={{ marginBottom: 8 }}>
-            Selected Songs ({submittedSongs.length}/{settings.requiredSongs})
+            Selected Songs ({submittedSongs.length}/{settings.maxSongs})
           </h4>
 
           {submittedSongs.length === 0 ? (
@@ -1362,12 +1434,24 @@ function SubmitView() {
 
         <button
           type="submit"
-          disabled={!entrantName.trim() || submittedSongs.length !== settings.requiredSongs}
+          disabled={
+            !entrantName.trim() ||
+            submittedSongs.length < settings.minSongs ||
+            submittedSongs.length > settings.maxSongs
+          }
           style={{
             marginTop: 20,
             width: "100%",
-            background: submittedSongs.length === settings.requiredSongs ? "var(--spark)" : "var(--surface-1)",
-            color: submittedSongs.length === settings.requiredSongs ? "var(--stage-void)" : "var(--text-muted)",
+            background={
+              submittedSongs.length >= settings.minSongs && submittedSongs.length <= settings.maxSongs
+                ? "var(--spark)"
+                : "var(--surface-1)"
+            },
+            color={
+              submittedSongs.length >= settings.minSongs && submittedSongs.length <= settings.maxSongs
+                ? "var(--stage-void)"
+                : "var(--text-muted)"
+            },
             fontWeight: 700,
             fontSize: 16,
             padding: "13px 16px",
