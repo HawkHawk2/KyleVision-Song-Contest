@@ -1101,6 +1101,8 @@ function AdminPanel() {
         ))}
       </div>
 
+      <AdminContestSettings t={t} onSave={persist} />
+
       {tab === "review" && (
         <div>
           <div style={{ marginBottom: 24 }}>
@@ -1184,7 +1186,6 @@ function AdminPanel() {
 
       {tab === "tournament" && (
         <div>
-          <AdminContestSettings t={t} onSave={persist} />
 
           <div style={{ marginBottom: 28 }}>
             <h2 style={{ fontSize: 20, marginBottom: 12 }}>Add entrant manually</h2>
@@ -1749,6 +1750,25 @@ function SubmitView() {
     }
   };
 
+  const startFresh = () => {
+    const confirmed = window.confirm(
+      "Start a fresh submission? Your current submission will stay in the admin queue, but this browser will start a new entry from an empty form."
+    );
+    if (!confirmed) return;
+
+    localStorage.removeItem("kv-submission-id");
+    setSubmissionId("");
+    setEntrantName("");
+    setSubmittedSongs([]);
+    setSavedSnapshot("");
+    savedSnapshotRef.current = "";
+    editingRef.current = false;
+    setSent(false);
+    setErr("");
+    setSaving(false);
+    setAcceptedRules(true);
+  };
+
   const handleFormSubmit = async (e) => {
     e.preventDefault();
 
@@ -1837,6 +1857,24 @@ function SubmitView() {
               Submissions are now locked. Your entry can no longer be changed.
             </p>
           )}
+        </div>
+      )}
+
+      {sent && !locked && (
+        <div style={{ marginBottom: 16, textAlign: "right" }}>
+          <button
+            type="button"
+            onClick={startFresh}
+            style={{
+              background: "transparent",
+              color: "var(--text-muted)",
+              border: "1px solid var(--border)",
+              fontSize: 12.5,
+              padding: "8px 11px",
+            }}
+          >
+            Start a fresh submission
+          </button>
         </div>
       )}
 
