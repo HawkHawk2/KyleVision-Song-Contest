@@ -220,7 +220,10 @@ async function saveState(t) {
 }
 async function loadSubs() {
   try {
-    const rows = await sb("submissions?select=id,name,songs,created_at&order=created_at.asc");
+    // Bust browser/proxy caching so the admin always sees the latest contestant edit.
+    const rows = await sb(`submissions?select=id,name,songs,created_at&order=created_at.asc&_ts=${Date.now()}`, {
+      cache: "no-store",
+    });
     return rows || [];
   } catch (e) {
     console.error("load submissions failed", e);
