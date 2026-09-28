@@ -220,9 +220,14 @@ async function saveState(t) {
 }
 async function loadSubs() {
   try {
-    // Bust browser/proxy caching so the admin always sees the latest contestant edit.
-    const rows = await sb(`submissions?select=id,name,songs,created_at&order=created_at.asc&_ts=${Date.now()}`, {
+    // Always request the latest submissions without browser caching.
+    // Do not add arbitrary query parameters: PostgREST treats them as column filters.
+    const rows = await sb("submissions?select=id,name,songs,created_at&order=created_at.asc", {
       cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        Pragma: "no-cache",
+      },
     });
     return rows || [];
   } catch (e) {
