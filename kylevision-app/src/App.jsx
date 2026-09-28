@@ -914,8 +914,31 @@ function AdminPanel() {
     const next = structuredClone(t);
     next.playedSongs = next.playedSongs || {};
     next.playedSongs[entrantId] = next.playedSongs[entrantId] || {};
-    next.playedSongs[entrantId][songIndex] = true;
+    if (next.playedSongs[entrantId][songIndex]) {
+      delete next.playedSongs[entrantId][songIndex];
+    } else {
+      next.playedSongs[entrantId][songIndex] = true;
+    }
     await persist(next);
+  };
+
+  const removeDeniedEntry = async (s) => {
+    if (!confirm(`Remove ${s.name}'s denied submission completely? This cannot be undone.`)) return;
+    try {
+      await deleteSubmission(s.id);
+      const next = structuredClone(t);
+      next.submissionReviews = next.submissionReviews || {};
+      delete next.submissionReviews[s.id];
+      const removedEntrantIds = (next.entrants || []).filter((e) => e.submissionId === s.id).map((e) => e.id);
+      next.entrants = (next.entrants || []).filter((e) => e.submissionId !== s.id);
+      next.playedSongs = next.playedSongs || {};
+      removedEntrantIds.forEach((id) => delete next.playedSongs[id]);
+      await persist(next);
+      setSubs((prev) => prev.filter((entry) => entry.id !== s.id));
+    } catch (e) {
+      console.error("Remove denied submission failed:", e);
+      setErr("Couldn't remove that submission right now.");
+    }
   };
 
   const pendingSubs = subs.filter((s) => {
@@ -1047,6 +1070,15 @@ function AdminPanel() {
                 </button>
               </>
             )}
+            {review.status === "denied" && (
+              <button
+                type="button"
+                onClick={() => removeDeniedEntry(s)}
+                style={{ background: "transparent", color: "var(--spark)", borderColor: "var(--spark)" }}
+              >
+                Remove entry
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1067,21 +1099,11 @@ function AdminPanel() {
           <h1 style={{ fontSize: 34 }}>{t.name}</h1>
         </div>
 
-        <button
-          onClick={toggleSubmissionLock}
-          style={{
-            background: t.submissionsLocked ? "rgba(107,214,138,.12)" : "rgba(255,79,126,.12)",
-            color: t.submissionsLocked ? "var(--ok)" : "var(--spark)",
-            borderColor: "currentColor",
-            fontWeight: 800,
-          }}
-        >
-          {t.submissionsLocked ? "Submissions locked" : "Lock all submissions"}
-        </button>
+
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 24, borderBottom: "1px solid var(--border)", paddingBottom: 2, flexWrap: "wrap" }}>
-        {["review", "accepted", "tournament"].map((tb) => (
+        {["review", "accepted", "settings"].map((tb) => (
           <button
             key={tb}
             onClick={() => setTab(tb)}
@@ -1096,12 +1118,10 @@ function AdminPanel() {
               marginRight: 20,
             }}
           >
-            {tb === "review" ? `Under review (${pendingSubs.length})` : tb === "accepted" ? `Accepted (${acceptedSubs.length})` : "Tournament"}
+            {tb === "review" ? `Under review (${pendingSubs.length})` : tb === "accepted" ? `Accepted (${acceptedSubs.length})` : "Settings"}
           </button>
         ))}
       </div>
-
-      <AdminContestSettings t={t} onSave={persist} />
 
       {tab === "review" && (
         <div>
@@ -1132,7 +1152,7 @@ function AdminPanel() {
       {tab === "accepted" && (
         <div>
           <p style={{ color: "var(--text-secondary)", fontSize: 13.5 }}>
-            Click a song after you play it. Played songs turn red so you can keep track during the tournament.
+            Click a song after you play it. Played songs turn red; click it again to mark it as not played.
           </p>
 
           {acceptedSubs.length === 0 ? (
@@ -1184,108 +1204,17 @@ function AdminPanel() {
         </div>
       )}
 
-      {tab === "tournament" && (
+      {tab === "settings" && (
         <div>
+          <AdminContestSettings t={t} onSave={persist} />
 
-          <div style={{ marginBottom: 28 }}>
-            <h2 style={{ fontSize: 20, marginBottom: 12 }}>Add entrant manually</h2>
-            <div style={{ background: "var(--stage-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-              <input placeholder="Viewer name" value={nameInput} onChange={(e) => setNameInput(e.target.value)} />
-              <textarea
-                placeholder={"One song per line, in the order they should be played"}
-                value={songInput}
-                onChange={(e) => setSongInput(e.target.value)}
-                rows={3}
-              />
-              <button onClick={addEntrant} style={{ alignSelf: "flex-start", background: "var(--spark)", color: "var(--stage-void)", fontWeight: 700, border: "none" }}>
-                Add entrant
-              </button>
-              {err && <p style={{ color: "var(--spark)", fontSize: 13, margin: 0 }}>{err}</p>}
-            </div>
-          </div>
-
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                <h2 style={{ fontSize: 20 }}>Accepted entrants</h2>
-                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{t.entrants.length}</span>
-              </div>
-              {t.entrants.length > 1 && (
-                <button onClick={shuffleEntrants} style={{ background: "transparent", color: "var(--text-secondary)" }}>
-                  Shuffle order
-                </button>
-              )}
-            </div>
-
-            {t.entrants.length === 0 ? (
-              <p style={{ fontSize: 13.5 }}>No accepted entrants yet.</p>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {t.entrants.map((e) => (
-                  <div
-                    key={e.id}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      background: "var(--stage-card)",
-                      border: "1px solid var(--border)",
-                      padding: "10px 14px",
-                      borderRadius: 10,
-                    }}
-                  >
-                    <span style={{ fontSize: 14 }}>
-                      <strong>{e.name}</strong>
-                      <span style={{ color: "var(--text-muted)" }}> — {(e.songs || []).length} songs, {e.songsUsed || 0} used</span>
-                    </span>
-                    <button
-                      onClick={() => removeEntrant(e.id)}
-                      aria-label="Remove"
-                      style={{ background: "transparent", color: "var(--text-muted)", padding: "4px 8px" }}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div style={{ marginTop: 28, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button
-              onClick={startTournament}
-              style={{ background: "var(--spark)", color: "var(--stage-void)", fontWeight: 700, border: "none", padding: "12px 20px" }}
-            >
-              {t.status === "setup" ? "Build bracket & start" : "Rebuild bracket"}
+          <div style={{ marginTop: 18, padding: 18, background: "var(--stage-card)", border: "1px solid var(--border)", borderRadius: "var(--radius)" }}>
+            <h2 style={{ marginTop: 0 }}>Submission lock</h2>
+            <p style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 4 }}>Locking submissions prevents contestants from changing existing entries.</p>
+            <button onClick={toggleSubmissionLock} style={{ background: t.submissionsLocked ? "rgba(107,214,138,.12)" : "rgba(255,79,126,.12)", color: t.submissionsLocked ? "var(--ok)" : "var(--spark)", borderColor: "currentColor", fontWeight: 800 }}>
+              {t.submissionsLocked ? "Unlock submissions" : "Lock all submissions"}
             </button>
-            {t.status !== "setup" && (
-              <button onClick={resetAll} style={{ background: "transparent", color: "var(--text-secondary)" }}>
-                Reset tournament
-              </button>
-            )}
           </div>
-
-          {t.status !== "setup" && (
-            <div style={{ marginTop: 32, display: "flex", flexDirection: "column", gap: 32 }}>
-              <BracketColumn title="Winners bracket" rounds={t.winners} anonymous={false} editable onPick={pickWinner} labelPrefix="W" />
-              {t.losers.length > 0 && (
-                <BracketColumn title="Losers bracket" rounds={t.losers} anonymous={false} editable onPick={pickWinner} labelPrefix="L" />
-              )}
-              {t.grandFinal && (
-                <div>
-                  <h3>Grand final</h3>
-                  <MatchCard m={t.grandFinal} label="Grand final" anonymous={false} editable onPick={pickGrandFinalWinner} />
-                </div>
-              )}
-              {t.grandFinal?.winner && (
-                <div style={{ background: "var(--bg-success)", border: "0.5px solid var(--border-success)", borderRadius: 10, padding: 16, textAlign: "center" }}>
-                  <p style={{ margin: 0, fontSize: 16, fontWeight: 500, color: "var(--text-success)" }}>
-                    Winner: {t.grandFinal.winner.name} — {currentSongFor(t.grandFinal.winner)}
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -1563,6 +1492,8 @@ function SubmitView() {
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const [editingDeniedIndex, setEditingDeniedIndex] = useState(null);
+  const [editingDeniedValue, setEditingDeniedValue] = useState("");
   const editingRef = useRef(false);
   const savedSnapshotRef = useRef("");
 
@@ -1643,6 +1574,34 @@ function SubmitView() {
       />
     );
   }
+
+  const beginDeniedEdit = (idx) => {
+    if (locked || saving || !deniedSongs[idx]) return;
+    editingRef.current = true;
+    setEditingDeniedIndex(idx);
+    setEditingDeniedValue(submittedSongs[idx] || "");
+    setErr("");
+  };
+
+  const cancelDeniedEdit = () => {
+    setEditingDeniedIndex(null);
+    setEditingDeniedValue("");
+    editingRef.current = false;
+  };
+
+  const applyDeniedEdit = () => {
+    const value = editingDeniedValue.trim();
+    if (editingDeniedIndex === null) return;
+    if (!value) {
+      setErr("The replacement song cannot be empty.");
+      return;
+    }
+    setSubmittedSongs((prev) => prev.map((song, index) => index === editingDeniedIndex ? value : song));
+    setEditingDeniedIndex(null);
+    setEditingDeniedValue("");
+    setErr("");
+    editingRef.current = true;
+  };
 
   const moveSong = (idx, direction) => {
     if (locked || saving) return;
@@ -1741,6 +1700,8 @@ function SubmitView() {
       setSubmittedSongs(cleanSongs);
       setSavedSnapshot(newSnapshot);
       savedSnapshotRef.current = newSnapshot;
+      setEditingDeniedIndex(null);
+      setEditingDeniedValue("");
       editingRef.current = false;
     } catch (e) {
       console.error("Submission update error:", e);
@@ -1766,6 +1727,8 @@ function SubmitView() {
     setSent(false);
     setErr("");
     setSaving(false);
+    setEditingDeniedIndex(null);
+    setEditingDeniedValue("");
     setAcceptedRules(true);
   };
 
@@ -1797,6 +1760,8 @@ function SubmitView() {
       const newSnapshot = JSON.stringify({ name: cleanName, songs: cleanSongs });
       setSavedSnapshot(newSnapshot);
       savedSnapshotRef.current = newSnapshot;
+      setEditingDeniedIndex(null);
+      setEditingDeniedValue("");
       editingRef.current = false;
       setErr("");
       setSent(true);
@@ -1937,10 +1902,28 @@ function SubmitView() {
                     }}
                   >
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                      <span style={{ flex: 1 }}>{song}</span>
+                      {denied && editingDeniedIndex === idx ? (
+                        <div style={{ flex: 1, display: "flex", gap: 6, alignItems: "center" }}>
+                          <input
+                            type="text"
+                            value={editingDeniedValue}
+                            onChange={(e) => setEditingDeniedValue(e.target.value)}
+                            autoFocus
+                            style={{ flex: 1, minWidth: 0 }}
+                            placeholder="Enter the replacement song"
+                          />
+                          <button type="button" onClick={applyDeniedEdit} disabled={saving} style={{ padding: "4px 8px", color: "var(--ok)" }}>Save</button>
+                          <button type="button" onClick={cancelDeniedEdit} disabled={saving} style={{ padding: "4px 8px" }}>Cancel</button>
+                        </div>
+                      ) : (
+                        <span style={{ flex: 1 }}>{song}</span>
+                      )}
 
-                      {!locked && (
+                      {!locked && editingDeniedIndex !== idx && (
                         <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                          {denied && (
+                            <button type="button" onClick={() => beginDeniedEdit(idx)} disabled={saving} style={{ padding: "4px 8px", color: "var(--spark)" }}>Edit song</button>
+                          )}
                           <button
                             type="button"
                             onClick={() => moveSong(idx, -1)}
