@@ -1562,6 +1562,8 @@ function SubmitView() {
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const editingRef = useRef(false);
+  const savedSnapshotRef = useRef("");
 
   useEffect(() => {
     let alive = true;
@@ -1579,9 +1581,16 @@ function SubmitView() {
 
         if (mine) {
           const songs = Array.isArray(mine.songs) ? mine.songs : [];
-          setEntrantName(mine.name || "");
-          setSubmittedSongs(songs);
-          setSavedSnapshot(JSON.stringify({ name: mine.name || "", songs }));
+          const remoteSnapshot = JSON.stringify({ name: mine.name || "", songs });
+
+          // Do not overwrite edits the contestant is currently making while
+          // the polling loop refreshes the admin/review status.
+          if (!editingRef.current) {
+            setEntrantName(mine.name || "");
+            setSubmittedSongs(songs);
+            setSavedSnapshot(remoteSnapshot);
+            savedSnapshotRef.current = remoteSnapshot;
+          }
           setSent(true);
         }
       } catch (e) {
@@ -1636,6 +1645,7 @@ function SubmitView() {
 
   const moveSong = (idx, direction) => {
     if (locked || saving) return;
+    editingRef.current = true;
     const next = [...submittedSongs];
     const target = idx + direction;
     if (target < 0 || target >= next.length) return;
@@ -1645,6 +1655,7 @@ function SubmitView() {
 
   const removeSong = (idx) => {
     if (locked || saving) return;
+    editingRef.current = true;
     setSubmittedSongs((prev) => prev.filter((_, i) => i !== idx));
     setErr("");
   };
@@ -1658,6 +1669,7 @@ function SubmitView() {
       setErr(`You can only submit up to ${settings.maxSongs} songs.`);
       return;
     }
+    editingRef.current = true;
     setSubmittedSongs((prev) => [...prev, song]);
     setErr("");
   };
@@ -1722,10 +1734,13 @@ function SubmitView() {
 
       await saveState(nextState);
 
+      const newSnapshot = JSON.stringify({ name: cleanName, songs: cleanSongs });
       setT(nextState);
       setEntrantName(cleanName);
       setSubmittedSongs(cleanSongs);
-      setSavedSnapshot(JSON.stringify({ name: cleanName, songs: cleanSongs }));
+      setSavedSnapshot(newSnapshot);
+      savedSnapshotRef.current = newSnapshot;
+      editingRef.current = false;
     } catch (e) {
       console.error("Submission update error:", e);
       setErr("Couldn't save your changes right now. Please try again.");
@@ -1759,7 +1774,10 @@ function SubmitView() {
       const id = await addSubmission(cleanName, cleanSongs);
       localStorage.setItem("kv-submission-id", id);
       setSubmissionId(id);
-      setSavedSnapshot(JSON.stringify({ name: cleanName, songs: cleanSongs }));
+      const newSnapshot = JSON.stringify({ name: cleanName, songs: cleanSongs });
+      setSavedSnapshot(newSnapshot);
+      savedSnapshotRef.current = newSnapshot;
+      editingRef.current = false;
       setErr("");
       setSent(true);
     } catch (e) {
@@ -1838,7 +1856,10 @@ function SubmitView() {
           <input
             type="text"
             value={entrantName}
-            onChange={(e) => setEntrantName(e.target.value)}
+            onChange={(e) => {
+              if (sent) editingRef.current = true;
+              setEntrantName(e.target.value);
+            }}
             placeholder="Your Twitch name"
             required
             disabled={locked}
