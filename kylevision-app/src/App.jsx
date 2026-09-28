@@ -20,6 +20,8 @@ const emptyTournament = () => ({
   activeMatchPath: null, // {bracket:'winners'|'losers'|'final', round, index}
   submissionsLocked: false,
   submissionReviews: {}, // { [submissionId]: { status, deniedSongs: { [songIndex]: true } } }
+  // Latest contestant-side copy used to keep admin display synchronized with edits.
+  submissionSnapshots: {},
   playedSongs: {}, // { [entrantId]: { [songIndex]: true } }
 });
 
@@ -1006,6 +1008,10 @@ function AdminPanel() {
   const SubmissionCard = ({ s, accepted = false }) => {
     const review = reviewFor(s.id);
     const deniedSongs = review.deniedSongs || {};
+    const snapshot = t.submissionSnapshots?.[s.id];
+    const displaySubmission = snapshot
+      ? { ...s, name: snapshot.name, songs: snapshot.songs }
+      : s;
     const editableByAdmin = !t.submissionsLocked;
 
     return (
@@ -1020,12 +1026,12 @@ function AdminPanel() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-              <strong style={{ fontSize: 15.5 }}>{s.name}</strong>
+              <strong style={{ fontSize: 15.5 }}>{displaySubmission.name}</strong>
               {statusBadge(review.status)}
             </div>
 
             <ol style={{ margin: 0, paddingLeft: 22, color: "var(--text-secondary)" }}>
-              {(s.songs || []).map((song, i) => {
+              {(displaySubmission.songs || []).map((song, i) => {
                 const denied = !!deniedSongs[i];
                 const played = !!t.playedSongs?.[
                   t.entrants.find((e) => e.submissionId === s.id)?.id
@@ -1050,8 +1056,8 @@ function AdminPanel() {
                           type="button"
                           onClick={() =>
                             denied
-                              ? clearSongChange(s, i)
-                              : requestSongChange(s, i)
+                              ? clearSongChange(displaySubmission, i)
+                              : requestSongChange(displaySubmission, i)
                           }
                           style={{
                             padding: "4px 8px",
@@ -1080,7 +1086,7 @@ function AdminPanel() {
             {!accepted && review.status !== "accepted" && review.status !== "denied" && (
               <>
                 <button
-                  onClick={() => approveSub(s)}
+                  onClick={() => approveSub(displaySubmission)}
                   disabled={Object.keys(deniedSongs).length >= (s.songs || []).length}
                   style={{
                     background: "var(--ok)",
@@ -1092,7 +1098,7 @@ function AdminPanel() {
                   Accept
                 </button>
                 <button
-                  onClick={() => denySubmission(s)}
+                  onClick={() => denySubmission(displaySubmission)}
                   style={{ background: "transparent", color: "var(--spark)" }}
                 >
                   Deny entry
@@ -1102,7 +1108,7 @@ function AdminPanel() {
             {review.status === "denied" && (
               <button
                 type="button"
-                onClick={() => removeDeniedEntry(s)}
+                onClick={() => removeDeniedEntry(displaySubmission)}
                 style={{ background: "transparent", color: "var(--spark)", borderColor: "var(--spark)" }}
               >
                 Remove entry
@@ -1743,6 +1749,12 @@ function SubmitView() {
         entrant.songsUsed = Math.min(Number(entrant.songsUsed || 0), entrant.songs.length);
       }
 
+      nextState.submissionSnapshots = nextState.submissionSnapshots || {};
+      nextState.submissionSnapshots[submissionId] = {
+        name: confirmedName,
+        songs: confirmedSongs,
+      };
+
       await saveState(nextState);
 
       const newSnapshot = confirmedSnapshot;
@@ -1806,6 +1818,14 @@ function SubmitView() {
 
     try {
       const id = await addSubmission(cleanName, cleanSongs);
+      // Keep a server-side snapshot in tournament_state as well. The admin UI
+      // can use this as the authoritative display copy while the submissions
+      // row and review state are being synchronized.
+      const submitState = structuredClone(t);
+      submitState.submissionSnapshots = submitState.submissionSnapshots || {};
+      submitState.submissionSnapshots[id] = { name: cleanName, songs: cleanSongs };
+      await saveState(submitState);
+      setT(submitState);
       localStorage.setItem("kv-submission-id", id);
       setSubmissionId(id);
       const newSnapshot = JSON.stringify({ name: cleanName, songs: cleanSongs });
