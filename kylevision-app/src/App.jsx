@@ -18,6 +18,9 @@ const emptyTournament = () => ({
   votingOpen: false,
   votes: { a: 0, b: 0 },
   activeMatchPath: null, // {bracket:'winners'|'losers'|'final', round, index}
+  submissionsLocked: false,
+  submissionReviews: {}, // { [submissionId]: { status, deniedSongs: { [songIndex]: true } } }
+  playedSongs: {}, // { [entrantId]: { [songIndex]: true } }
 });
 
 // The song an entrant plays for a given match is songs[songsUsed], taken at
@@ -217,27 +220,34 @@ async function saveState(t) {
 }
 async function loadSubs() {
   try {
-    const rows = await sb("submissions?select=id,name,songs&order=created_at.asc");
+    const rows = await sb("submissions?select=id,name,songs,created_at&order=created_at.asc");
     return rows || [];
   } catch (e) {
-    console.error("load failed", e);
+    console.error("load submissions failed", e);
     return [];
   }
 }
-async function saveSubs(subs) {
-  // subs list is derived from the table; this function now just deletes
-  // rows that are no longer present (used after approve/reject).
-  // Kept for API compatibility with the rest of the app.
-  return subs;
-}
+
 async function addSubmission(name, songs) {
+  const id = uid();
   await sb("submissions", {
     method: "POST",
-    body: JSON.stringify([{ id: uid(), name, songs }]),
+    body: JSON.stringify([{ id, name, songs }]),
+  });
+  return id;
+}
+
+async function updateSubmission(id, name, songs) {
+  await sb(`submissions?id=eq.${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name, songs }),
   });
 }
+
 async function deleteSubmission(id) {
-  await sb(`submissions?id=eq.${id}`, { method: "DELETE" });
+  // Kept for compatibility with older data/tools. New admin actions keep
+  // submissions in the table so contestants can see their review state.
+  await sb(`submissions?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 const ADMIN_SESSION_KEY = "kv-admin-unlocked";
@@ -648,26 +658,51 @@ function AdminView() {
 function AdminPanel() {
   const [t, setT] = useState(null);
   const [subs, setSubs] = useState([]);
+  const [tab, setTab] = useState("review");
   const [nameInput, setNameInput] = useState("");
   const [songInput, setSongInput] = useState("");
-  const [tab, setTab] = useState("setup");
   const [err, setErr] = useState("");
   const pollRef = useRef(null);
 
   useEffect(() => {
-    (async () => {
-      setT(await loadState());
-      setSubs(await loadSubs());
-    })();
-    pollRef.current = setInterval(async () => {
-      setSubs(await loadSubs());
-    }, 4000);
-    return () => clearInterval(pollRef.current);
+    let alive = true;
+
+    const load = async () => {
+      try {
+        const [nextT, nextSubs] = await Promise.all([loadState(), loadSubs()]);
+        if (alive) {
+          setT(nextT);
+          setSubs(nextSubs);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    load();
+    pollRef.current = setInterval(load, 1200);
+    return () => {
+      alive = false;
+      clearInterval(pollRef.current);
+    };
   }, []);
 
   const persist = async (next) => {
     setT(next);
     await saveState(next);
+  };
+
+  const reviews = t?.submissionReviews || {};
+  const reviewFor = (id) => reviews[id] || { status: "pending", deniedSongs: {} };
+
+  const persistReview = async (submissionId, patch) => {
+    const next = structuredClone(t);
+    next.submissionReviews = next.submissionReviews || {};
+    next.submissionReviews[submissionId] = {
+      ...reviewFor(submissionId),
+      ...patch,
+    };
+    await persist(next);
   };
 
   const addEntrant = () => {
@@ -677,10 +712,13 @@ function AdminPanel() {
       return;
     }
     setErr("");
-    const next = { ...t, entrants: [...t.entrants, { id: uid(), name: nameInput.trim(), songs, songsUsed: 0 }] };
+    const next = {
+      ...t,
+      entrants: [...t.entrants, { id: uid(), name: nameInput.trim(), songs, songsUsed: 0 }],
+    };
+    persist(next);
     setNameInput("");
     setSongInput("");
-    persist(next);
   };
 
   const removeEntrant = (id) => {
@@ -688,16 +726,91 @@ function AdminPanel() {
   };
 
   const approveSub = async (s) => {
-    const songs = Array.isArray(s.songs) ? s.songs : (s.song ? [s.song] : []);
-    const next = { ...t, entrants: [...t.entrants, { id: uid(), name: s.name, songs, songsUsed: 0 }] };
+    const review = reviewFor(s.id);
+    const songs = (Array.isArray(s.songs) ? s.songs : []).filter(
+      (_, i) => !review.deniedSongs?.[i]
+    );
+
+    if (songs.length === 0) {
+      setErr("This submission has no approved songs. Ask the contestant to replace the denied songs first.");
+      return;
+    }
+
+    const existing = t.entrants.find((e) => e.submissionId === s.id);
+    let next = structuredClone(t);
+
+    if (existing) {
+      existing.name = s.name;
+      existing.songs = songs;
+    } else {
+      next.entrants.push({
+        id: uid(),
+        submissionId: s.id,
+        name: s.name,
+        songs,
+        songsUsed: 0,
+      });
+    }
+
+    next.submissionReviews = next.submissionReviews || {};
+    next.submissionReviews[s.id] = {
+      ...review,
+      status: "accepted",
+      deniedSongs: review.deniedSongs || {},
+    };
+
     await persist(next);
-    await deleteSubmission(s.id);
-    setSubs(subs.filter((x) => x.id !== s.id));
+    setTab("accepted");
   };
 
-  const rejectSub = async (s) => {
-    await deleteSubmission(s.id);
-    setSubs(subs.filter((x) => x.id !== s.id));
+  const denySubmission = async (s) => {
+    await persistReview(s.id, { status: "denied" });
+  };
+
+  const requestSongChange = async (s, songIndex) => {
+    const review = reviewFor(s.id);
+    const deniedSongs = {
+      ...(review.deniedSongs || {}),
+      [songIndex]: s.songs?.[songIndex] || "",
+    };
+
+    await persistReview(s.id, {
+      status: "needs_changes",
+      deniedSongs,
+    });
+
+    // If this entry was already accepted, remove the affected song from the
+    // live entrant copy until the contestant replaces it.
+    const entrant = t.entrants.find((e) => e.submissionId === s.id);
+    if (entrant) {
+      const next = structuredClone(t);
+      const nextEntrant = next.entrants.find((e) => e.submissionId === s.id);
+      if (nextEntrant) {
+        nextEntrant.songs = (s.songs || []).filter((_, i) => !deniedSongs[i]);
+        nextEntrant.songsUsed = Math.min(
+          Number(nextEntrant.songsUsed || 0),
+          nextEntrant.songs.length
+        );
+      }
+      next.submissionReviews[s.id] = {
+        ...review,
+        status: "needs_changes",
+        deniedSongs,
+      };
+      await persist(next);
+    }
+  };
+
+  const clearSongChange = async (s, songIndex) => {
+    const review = reviewFor(s.id);
+    const deniedSongs = { ...(review.deniedSongs || {}) };
+    delete deniedSongs[songIndex];
+
+    const remainingDenied = Object.keys(deniedSongs).length > 0;
+    await persistReview(s.id, {
+      status: remainingDenied ? "needs_changes" : review.status === "needs_changes" ? "pending" : review.status,
+      deniedSongs,
+    });
   };
 
   const shuffleEntrants = () => {
@@ -716,10 +829,16 @@ function AdminPanel() {
     }
     setErr("");
     const b = buildBracket(t.entrants);
-    let next = { ...t, ...b, status: "running", votes: { a: 0, b: 0 }, votingOpen: false };
+    let next = {
+      ...t,
+      ...b,
+      status: "running",
+      votes: { a: 0, b: 0 },
+      votingOpen: false,
+    };
     next = autoResolveByes(next);
     persist(next);
-    setTab("bracket");
+    setTab("tournament");
   };
 
   const pickWinner = (bracketName, ri, mi, winner) => {
@@ -733,8 +852,6 @@ function AdminPanel() {
     match.winner = { ...winner };
     match.loser = winner.id === match.a.id ? { ...match.b } : { ...match.a };
 
-    // A song is consumed when the entrant finishes a match, regardless of
-    // whether they won or lost. This keeps the next-round song aligned.
     advanceEntrantSong(next, match.winner.id);
     advanceEntrantSong(next, match.loser.id);
 
@@ -743,11 +860,7 @@ function AdminPanel() {
     next.votes = { a: 0, b: 0 };
     next.votingOpen = false;
 
-    try {
-      persist(next);
-    } catch (e) {
-      console.error("Failed to persist winner:", e);
-    }
+    persist(next);
   };
 
   const pickGrandFinalWinner = (entrant) => {
@@ -772,49 +885,203 @@ function AdminPanel() {
     persist(next);
   };
 
-  const toggleVoting = () => {
-    persist({ ...t, votingOpen: !t.votingOpen, votes: { a: 0, b: 0 } });
-  };
-  const resetVotes = () => {
-    persist({ ...t, votes: { a: 0, b: 0 } });
-  };
-  const bumpVote = (side) => {
-    const next = { ...t, votes: { ...t.votes, [side]: t.votes[side] + 1 } };
-    persist(next);
-  };
-
   const resetAll = () => {
-    if (!confirm("Reset the whole tournament? Entrants list is kept, bracket is cleared.")) return;
+    if (!confirm("Reset the whole tournament? Entrants list is kept.")) return;
     const resetEntrants = t.entrants.map((e) => ({ ...e, songsUsed: 0 }));
-    persist({ ...emptyTournament(), name: t.name, entrants: resetEntrants });
+    persist({
+      ...emptyTournament(),
+      name: t.name,
+      entrants: resetEntrants,
+      submissionsLocked: t.submissionsLocked,
+      submissionReviews: t.submissionReviews || {},
+    });
   };
 
-  if (!t) return <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>;
+  const toggleSubmissionLock = async () => {
+    const locked = !t.submissionsLocked;
+    if (
+      locked &&
+      !confirm(
+        "Lock all contestant submissions? Everyone will lose the ability to edit their entry after this."
+      )
+    ) {
+      return;
+    }
+    await persist({ ...t, submissionsLocked: locked });
+  };
+
+  const markSongPlayed = async (entrantId, songIndex) => {
+    const next = structuredClone(t);
+    next.playedSongs = next.playedSongs || {};
+    next.playedSongs[entrantId] = next.playedSongs[entrantId] || {};
+    next.playedSongs[entrantId][songIndex] = true;
+    await persist(next);
+  };
+
+  const pendingSubs = subs.filter((s) => {
+    const status = reviewFor(s.id).status;
+    return status === "pending" || status === "needs_changes";
+  });
+
+  const acceptedSubs = subs.filter((s) => reviewFor(s.id).status === "accepted");
+  const deniedSubs = subs.filter((s) => reviewFor(s.id).status === "denied");
+
+  const statusBadge = (status) => {
+    const map = {
+      pending: ["Under review", "var(--gold)"],
+      needs_changes: ["Changes requested", "var(--spark)"],
+      accepted: ["Accepted", "var(--ok)"],
+      denied: ["Denied", "var(--spark)"],
+    };
+    const [label, color] = map[status] || map.pending;
+    return (
+      <span
+        style={{
+          fontSize: 11,
+          fontWeight: 800,
+          padding: "4px 8px",
+          borderRadius: 999,
+          color,
+          border: `1px solid ${color}`,
+          background: "rgba(0,0,0,.12)",
+        }}
+      >
+        {label}
+      </span>
+    );
+  };
+
+  const SubmissionCard = ({ s, accepted = false }) => {
+    const review = reviewFor(s.id);
+    const deniedSongs = review.deniedSongs || {};
+    const editableByAdmin = !t.submissionsLocked;
+
+    return (
+      <div
+        style={{
+          background: "var(--stage-card)",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          padding: "14px 16px",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+              <strong style={{ fontSize: 15.5 }}>{s.name}</strong>
+              {statusBadge(review.status)}
+            </div>
+
+            <ol style={{ margin: 0, paddingLeft: 22, color: "var(--text-secondary)" }}>
+              {(s.songs || []).map((song, i) => {
+                const denied = !!deniedSongs[i];
+                const played = !!t.playedSongs?.[
+                  t.entrants.find((e) => e.submissionId === s.id)?.id
+                ]?.[i];
+
+                return (
+                  <li
+                    key={`${s.id}-${i}`}
+                    style={{
+                      margin: "7px 0",
+                      padding: "5px 7px",
+                      borderRadius: 7,
+                      background: denied ? "rgba(255,79,126,.14)" : "transparent",
+                      color: denied ? "var(--spark)" : played ? "var(--spark)" : "var(--text-secondary)",
+                      textDecoration: denied ? "line-through" : "none",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                      <span>{song}</span>
+                      {!t.submissionsLocked && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            denied
+                              ? clearSongChange(s, i)
+                              : requestSongChange(s, i)
+                          }
+                          style={{
+                            padding: "4px 8px",
+                            fontSize: 11,
+                            background: denied ? "rgba(107,214,138,.12)" : "transparent",
+                            color: denied ? "var(--ok)" : "var(--spark)",
+                          }}
+                        >
+                          {denied ? "Un-deny" : "Deny / request change"}
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+
+            {review.status === "needs_changes" && (
+              <p style={{ margin: "8px 0 0", fontSize: 12.5, color: "var(--spark)" }}>
+                One or more songs need to be replaced by the contestant.
+              </p>
+            )}
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+            {!accepted && review.status !== "accepted" && review.status !== "denied" && (
+              <>
+                <button
+                  onClick={() => approveSub(s)}
+                  disabled={Object.keys(deniedSongs).length >= (s.songs || []).length}
+                  style={{
+                    background: "var(--ok)",
+                    color: "var(--stage-void)",
+                    fontWeight: 700,
+                    border: "none",
+                  }}
+                >
+                  Accept
+                </button>
+                <button
+                  onClick={() => denySubmission(s)}
+                  style={{ background: "transparent", color: "var(--spark)" }}
+                >
+                  Deny entry
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  if (!t) {
+    return <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>;
+  }
 
   return (
     <div>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
         <div>
-          <div style={{ fontSize: 12.5, letterSpacing: "0.04em", color: "var(--spark)", fontWeight: 700, marginBottom: 4 }}>Backstage</div>
+          <div style={{ fontSize: 12.5, letterSpacing: "0.04em", color: "var(--spark)", fontWeight: 700, marginBottom: 4 }}>
+            Backstage
+          </div>
           <h1 style={{ fontSize: 34 }}>{t.name}</h1>
         </div>
-        <span
+
+        <button
+          onClick={toggleSubmissionLock}
           style={{
-            fontSize: 12,
-            fontWeight: 700,
-            padding: "6px 12px",
-            borderRadius: 20,
-            background: t.status === "setup" ? "rgba(255,205,74,0.12)" : t.status === "done" ? "rgba(107,214,138,0.14)" : "rgba(255,79,126,0.12)",
-            color: t.status === "setup" ? "var(--gold)" : t.status === "done" ? "var(--ok)" : "var(--spark)",
-            border: "1px solid currentColor",
+            background: t.submissionsLocked ? "rgba(107,214,138,.12)" : "rgba(255,79,126,.12)",
+            color: t.submissionsLocked ? "var(--ok)" : "var(--spark)",
+            borderColor: "currentColor",
+            fontWeight: 800,
           }}
         >
-          {t.status}
-        </span>
+          {t.submissionsLocked ? "Submissions locked" : "Lock all submissions"}
+        </button>
       </div>
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 24, borderBottom: "1px solid var(--border)", paddingBottom: 2 }}>
-        {["setup", "bracket", "voting"].map((tb) => (
+      <div style={{ display: "flex", gap: 6, marginBottom: 24, borderBottom: "1px solid var(--border)", paddingBottom: 2, flexWrap: "wrap" }}>
+        {["review", "accepted", "tournament"].map((tb) => (
           <button
             key={tb}
             onClick={() => setTab(tb)}
@@ -829,65 +1096,95 @@ function AdminPanel() {
               marginRight: 20,
             }}
           >
-            {tb === "setup" ? "Queue & entrants" : tb === "bracket" ? "Bracket" : "Live voting"}
+            {tb === "review" ? `Under review (${pendingSubs.length})` : tb === "accepted" ? `Accepted (${acceptedSubs.length})` : "Tournament"}
           </button>
         ))}
       </div>
 
-      {tab === "setup" && (
+      {tab === "review" && (
         <div>
-          <AdminContestSettings t={t} onSave={persist} />
-
-          <div style={{ marginBottom: 28 }}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 }}>
-              <h2 style={{ fontSize: 20 }}>Queue</h2>
-              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{subs.length} waiting</span>
-            </div>
-            {subs.length === 0 ? (
+          <div style={{ marginBottom: 24 }}>
+            <h2 style={{ fontSize: 20, marginBottom: 12 }}>Submissions</h2>
+            {pendingSubs.length === 0 ? (
               <div style={{ padding: "24px 20px", textAlign: "center", background: "var(--stage-card)", border: "1px dashed var(--border)", borderRadius: "var(--radius)" }}>
-                <p style={{ margin: 0, fontSize: 13.5 }}>Nothing waiting for review. New entries will show up here as viewers submit.</p>
+                <p style={{ margin: 0, fontSize: 13.5 }}>Nothing is waiting for review.</p>
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {subs.map((s) => (
+                {pendingSubs.map((s) => <SubmissionCard key={s.id} s={s} />)}
+              </div>
+            )}
+          </div>
+
+          {deniedSubs.length > 0 && (
+            <div>
+              <h2 style={{ fontSize: 20, marginBottom: 12 }}>Denied entries</h2>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {deniedSubs.map((s) => <SubmissionCard key={s.id} s={s} />)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "accepted" && (
+        <div>
+          <p style={{ color: "var(--text-secondary)", fontSize: 13.5 }}>
+            Click a song after you play it. Played songs turn red so you can keep track during the tournament.
+          </p>
+
+          {acceptedSubs.length === 0 ? (
+            <p style={{ color: "var(--text-muted)" }}>No accepted entries yet.</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {acceptedSubs.map((s) => {
+                const entrant = t.entrants.find((e) => e.submissionId === s.id);
+                return (
                   <div
                     key={s.id}
                     style={{
                       background: "var(--stage-card)",
                       border: "1px solid var(--border)",
                       borderRadius: "var(--radius)",
-                      padding: "14px 16px",
+                      padding: 16,
                     }}
                   >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: 15.5, marginBottom: 6 }}>{s.name}</div>
-                        <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13.5, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 2 }}>
-                          {(s.songs || []).map((song, i) => (
-                            <li key={i}>{song}</li>
-                          ))}
-                        </ol>
-                      </div>
-                      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                        <button
-                          onClick={() => approveSub(s)}
-                          style={{ background: "var(--ok)", color: "var(--stage-void)", fontWeight: 700, border: "none", padding: "8px 14px" }}
-                        >
-                          Approve
-                        </button>
-                        <button
-                          onClick={() => rejectSub(s)}
-                          style={{ background: "transparent", color: "var(--text-muted)" }}
-                        >
-                          Reject
-                        </button>
-                      </div>
+                    <div style={{ fontWeight: 800, marginBottom: 8 }}>{s.name}</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {(s.songs || []).map((song, i) => {
+                        const played = !!t.playedSongs?.[entrant?.id]?.[i];
+                        const denied = !!reviewFor(s.id).deniedSongs?.[i];
+                        return (
+                          <button
+                            key={`${s.id}-accepted-${i}`}
+                            type="button"
+                            disabled={denied}
+                            onClick={() => entrant && markSongPlayed(entrant.id, i)}
+                            style={{
+                              textAlign: "left",
+                              background: played ? "rgba(255,79,126,.16)" : "rgba(0,0,0,.12)",
+                              color: played ? "var(--spark)" : "var(--text-primary)",
+                              borderColor: played ? "var(--spark)" : "var(--border)",
+                              textDecoration: denied ? "line-through" : "none",
+                            }}
+                          >
+                            <strong style={{ marginRight: 8 }}>{i + 1}.</strong>{song}
+                            {played && <span style={{ float: "right", fontWeight: 800 }}>PLAYED</span>}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "tournament" && (
+        <div>
+          <AdminContestSettings t={t} onSave={persist} />
 
           <div style={{ marginBottom: 28 }}>
             <h2 style={{ fontSize: 20, marginBottom: 12 }}>Add entrant manually</h2>
@@ -909,7 +1206,7 @@ function AdminPanel() {
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                <h2 style={{ fontSize: 20 }}>Entrants</h2>
+                <h2 style={{ fontSize: 20 }}>Accepted entrants</h2>
                 <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{t.entrants.length}</span>
               </div>
               {t.entrants.length > 1 && (
@@ -918,8 +1215,9 @@ function AdminPanel() {
                 </button>
               )}
             </div>
+
             {t.entrants.length === 0 ? (
-              <p style={{ fontSize: 13.5 }}>No entrants yet — approve submissions or add someone manually above.</p>
+              <p style={{ fontSize: 13.5 }}>No accepted entrants yet.</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {t.entrants.map((e) => (
@@ -937,9 +1235,13 @@ function AdminPanel() {
                   >
                     <span style={{ fontSize: 14 }}>
                       <strong>{e.name}</strong>
-                      <span style={{ color: "var(--text-muted)" }}> — {(e.songs || []).length} song{(e.songs || []).length === 1 ? "" : "s"}, {(e.songsUsed || 0)} used</span>
+                      <span style={{ color: "var(--text-muted)" }}> — {(e.songs || []).length} songs, {e.songsUsed || 0} used</span>
                     </span>
-                    <button onClick={() => removeEntrant(e.id)} aria-label="Remove" style={{ background: "transparent", color: "var(--text-muted)", padding: "4px 8px" }}>
+                    <button
+                      onClick={() => removeEntrant(e.id)}
+                      aria-label="Remove"
+                      style={{ background: "transparent", color: "var(--text-muted)", padding: "4px 8px" }}
+                    >
                       ✕
                     </button>
                   </div>
@@ -948,7 +1250,7 @@ function AdminPanel() {
             )}
           </div>
 
-          <div style={{ marginTop: 28, display: "flex", gap: 10 }}>
+          <div style={{ marginTop: 28, display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
               onClick={startTournament}
               style={{ background: "var(--spark)", color: "var(--stage-void)", fontWeight: 700, border: "none", padding: "12px 20px" }}
@@ -961,15 +1263,9 @@ function AdminPanel() {
               </button>
             )}
           </div>
-        </div>
-      )}
 
-      {tab === "bracket" && (
-        <div>
-          {t.status === "setup" ? (
-            <p style={{ color: "var(--text-muted)" }}>Add entrants and start the tournament first.</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 32 }}>
+          {t.status !== "setup" && (
+            <div style={{ marginTop: 32, display: "flex", flexDirection: "column", gap: 32 }}>
               <BracketColumn title="Winners bracket" rounds={t.winners} anonymous={false} editable onPick={pickWinner} labelPrefix="W" />
               {t.losers.length > 0 && (
                 <BracketColumn title="Losers bracket" rounds={t.losers} anonymous={false} editable onPick={pickWinner} labelPrefix="L" />
@@ -987,35 +1283,6 @@ function AdminPanel() {
                   </p>
                 </div>
               )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {tab === "voting" && (
-        <div>
-          {t.status === "setup" ? (
-            <p style={{ color: "var(--text-muted)" }}>Start the tournament to enable voting.</p>
-          ) : (
-            <div>
-              <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                Voting is manual-count here: watch Twitch chat for 1 / 2 and click the buttons below, or wire up a chat bot later to call the same store. This panel is what your OBS overlay reads from live.
-              </p>
-              <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-                <button onClick={toggleVoting} style={{ borderColor: t.votingOpen ? "var(--border-danger)" : "var(--border-accent)", color: t.votingOpen ? "var(--text-danger)" : "var(--text-accent)" }}>
-                  {t.votingOpen ? "Close voting" : "Open voting"}
-                </button>
-                <button onClick={resetVotes}><i className="ti ti-refresh" aria-hidden="true" /> Reset votes</button>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                {["a", "b"].map((side) => (
-                  <div key={side} style={{ background: "var(--surface-1)", borderRadius: 10, padding: 16, textAlign: "center" }}>
-                    <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 6 }}>Song {side === "a" ? "1" : "2"}</div>
-                    <div style={{ fontSize: 32, fontWeight: 500, marginBottom: 10 }}>{t.votes[side]}</div>
-                    <button onClick={() => bumpVote(side)} disabled={!t.votingOpen}>+1 (manual)</button>
-                  </div>
-                ))}
-              </div>
             </div>
           )}
         </div>
@@ -1290,39 +1557,75 @@ function SubmitView() {
   const [acceptedRules, setAcceptedRules] = useState(false);
   const [entrantName, setEntrantName] = useState("");
   const [submittedSongs, setSubmittedSongs] = useState([]);
+  const [submissionId, setSubmissionId] = useState(() => localStorage.getItem("kv-submission-id") || "");
+  const [savedSnapshot, setSavedSnapshot] = useState("");
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let alive = true;
 
     const load = async () => {
       try {
-        const next = await loadState();
-        if (alive) setT(next);
+        const [next, allSubs] = await Promise.all([loadState(), loadSubs()]);
+        if (!alive) return;
+
+        setT(next);
+
+        const mine = submissionId
+          ? allSubs.find((s) => s.id === submissionId)
+          : null;
+
+        if (mine) {
+          const songs = Array.isArray(mine.songs) ? mine.songs : [];
+          setEntrantName(mine.name || "");
+          setSubmittedSongs(songs);
+          setSavedSnapshot(JSON.stringify({ name: mine.name || "", songs }));
+          setSent(true);
+        }
       } catch (e) {
         console.error(e);
       }
     };
 
     load();
-
-    // Polling keeps the public form in sync with admin changes without
-    // requiring a page refresh.
-    const timer = setInterval(load, 2000);
+    const timer = setInterval(load, 1200);
     return () => {
       alive = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [submissionId]);
 
   if (!t) {
     return <div style={{ textAlign: "center", padding: "4rem 1rem" }}>Loading contest…</div>;
   }
 
   const settings = getContestSettings(t);
+  const review = submissionId
+    ? t.submissionReviews?.[submissionId] || { status: "pending", deniedSongs: {} }
+    : null;
 
-  if (!acceptedRules) {
+  const locked = !!t.submissionsLocked;
+  const deniedSongs = review?.deniedSongs || {};
+
+  const statusLabel =
+    review?.status === "accepted"
+      ? "Accepted"
+      : review?.status === "needs_changes"
+        ? "Changes requested"
+        : review?.status === "denied"
+          ? "Entry denied"
+          : "Under review";
+
+  const statusColor =
+    review?.status === "accepted"
+      ? "var(--ok)"
+      : review?.status === "needs_changes" || review?.status === "denied"
+        ? "var(--spark)"
+        : "var(--gold)";
+
+  if (!acceptedRules && !sent) {
     return (
       <RulesGate
         settings={settings}
@@ -1331,30 +1634,26 @@ function SubmitView() {
     );
   }
 
-  if (sent) {
-    return (
-      <div style={{ maxWidth: 460, margin: "4rem auto", textAlign: "center", padding: "0 1rem" }}>
-        <h1>Submission received</h1>
-        <p style={{ marginTop: 10 }}>
-          Your entry has been sent for review. Good luck in KyleVision #{settings.contestNumber}!
-        </p>
-        <button
-          onClick={() => {
-            setSent(false);
-            setAcceptedRules(false);
-            setEntrantName("");
-            setSubmittedSongs([]);
-            setErr("");
-          }}
-          style={{ marginTop: 20 }}
-        >
-          Submit another entry
-        </button>
-      </div>
-    );
-  }
+  const moveSong = (idx, direction) => {
+    if (locked || saving) return;
+    const next = [...submittedSongs];
+    const target = idx + direction;
+    if (target < 0 || target >= next.length) return;
+    [next[idx], next[target]] = [next[target], next[idx]];
+    setSubmittedSongs(next);
+  };
+
+  const removeSong = (idx) => {
+    if (locked || saving) return;
+    setSubmittedSongs((prev) => prev.filter((_, i) => i !== idx));
+    setErr("");
+  };
 
   const addSong = (song) => {
+    if (locked) {
+      setErr("Submissions are locked. You can no longer edit your songs.");
+      return;
+    }
     if (submittedSongs.length >= settings.maxSongs) {
       setErr(`You can only submit up to ${settings.maxSongs} songs.`);
       return;
@@ -1363,13 +1662,85 @@ function SubmitView() {
     setErr("");
   };
 
-  const removeSong = (idx) => {
-    setSubmittedSongs((prev) => prev.filter((_, i) => i !== idx));
+  const saveChanges = async () => {
+    if (!submissionId || locked || saving) return;
+
+    const cleanName = entrantName.trim();
+    const cleanSongs = submittedSongs.map((s) => s.trim()).filter(Boolean);
+
+    if (!cleanName) {
+      setErr("You must enter your Twitch name.");
+      return;
+    }
+    if (cleanSongs.length < settings.minSongs || cleanSongs.length > settings.maxSongs) {
+      setErr(`You must have between ${settings.minSongs} and ${settings.maxSongs} songs.`);
+      return;
+    }
+
+    setSaving(true);
     setErr("");
+
+    try {
+      await updateSubmission(submissionId, cleanName, cleanSongs);
+
+      // A denied song is considered resolved when that position is replaced.
+      // Keep unchanged denied songs highlighted.
+      const latestState = await loadState();
+      const currentReview = latestState.submissionReviews?.[submissionId] || {
+        status: "pending",
+        deniedSongs: {},
+      };
+      const nextDenied = { ...(currentReview.deniedSongs || {}) };
+
+      Object.keys(nextDenied).forEach((key) => {
+        const index = Number(key);
+        const oldDeniedSong = nextDenied[key];
+        const newSong = cleanSongs[index];
+        if (newSong && newSong !== oldDeniedSong) {
+          delete nextDenied[key];
+        } else if (index >= cleanSongs.length) {
+          delete nextDenied[key];
+        }
+      });
+
+      const nextState = structuredClone(latestState);
+      nextState.submissionReviews = nextState.submissionReviews || {};
+      nextState.submissionReviews[submissionId] = {
+        ...currentReview,
+        status: Object.keys(nextDenied).length > 0 ? "needs_changes" : "pending",
+        deniedSongs: nextDenied,
+      };
+
+      // Keep an already-accepted entrant copy synchronized with the edited
+      // submission so the admin/tournament view updates too.
+      const entrant = nextState.entrants.find((e) => e.submissionId === submissionId);
+      if (entrant) {
+        entrant.name = cleanName;
+        entrant.songs = cleanSongs.filter((_, i) => !nextDenied[i]);
+        entrant.songsUsed = Math.min(Number(entrant.songsUsed || 0), entrant.songs.length);
+      }
+
+      await saveState(nextState);
+
+      setT(nextState);
+      setEntrantName(cleanName);
+      setSubmittedSongs(cleanSongs);
+      setSavedSnapshot(JSON.stringify({ name: cleanName, songs: cleanSongs }));
+    } catch (e) {
+      console.error("Submission update error:", e);
+      setErr("Couldn't save your changes right now. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleFormSubmit = async (e) => {
     e.preventDefault();
+
+    if (sent) {
+      await saveChanges();
+      return;
+    }
 
     const cleanName = entrantName.trim();
     const cleanSongs = submittedSongs.map((s) => s.trim()).filter(Boolean);
@@ -1385,9 +1756,10 @@ function SubmitView() {
     }
 
     try {
-      await addSubmission(cleanName, cleanSongs);
-      setEntrantName("");
-      setSubmittedSongs([]);
+      const id = await addSubmission(cleanName, cleanSongs);
+      localStorage.setItem("kv-submission-id", id);
+      setSubmissionId(id);
+      setSavedSnapshot(JSON.stringify({ name: cleanName, songs: cleanSongs }));
       setErr("");
       setSent(true);
     } catch (e) {
@@ -1396,22 +1768,59 @@ function SubmitView() {
     }
   };
 
+  const hasChanges = sent
+    ? JSON.stringify({ name: entrantName.trim(), songs: submittedSongs.map((s) => s.trim()).filter(Boolean) }) !== savedSnapshot
+    : false;
+
   return (
-    <div style={{ maxWidth: 480, margin: "0 auto", padding: "1rem 0 3rem" }}>
+    <div style={{ maxWidth: 560, margin: "0 auto", padding: "1rem 0 3rem" }}>
       <div style={{ textAlign: "center", marginBottom: 28 }}>
         <div style={{ fontSize: 13, color: "var(--spark)", fontWeight: 700 }}>
           KYLEVISION SONG CONTEST #{settings.contestNumber}
         </div>
-        <h1 style={{ fontSize: 40 }}>Submit your entry</h1>
+        <h1 style={{ fontSize: 40 }}>{sent ? "Your submission" : "Submit your entry"}</h1>
         <p style={{ marginTop: 8 }}>
           You can request between <strong>{settings.minSongs}</strong> and{" "}
           <strong>{settings.maxSongs}</strong> songs.
         </p>
-        <p style={{ marginTop: 8, fontSize: 13.5, color: "var(--text-secondary)" }}>
-          If you request fewer songs than are needed to get through the tournament,
-          your old songs will be replayed in the same order you submitted them.
-        </p>
       </div>
+
+      {sent && (
+        <div
+          style={{
+            marginBottom: 16,
+            padding: 14,
+            borderRadius: "var(--radius)",
+            border: `1px solid ${statusColor}`,
+            background: "rgba(0,0,0,.12)",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+            <strong>{statusLabel}</strong>
+            <span style={{ color: statusColor, fontSize: 13, fontWeight: 800 }}>
+              {locked ? "LOCKED" : "LIVE"}
+            </span>
+          </div>
+
+          {review?.status === "needs_changes" && (
+            <p style={{ margin: "8px 0 0", color: "var(--spark)", fontSize: 13 }}>
+              The highlighted songs were denied by the admin. Replace them below and save your changes.
+            </p>
+          )}
+
+          {review?.status === "accepted" && !locked && (
+            <p style={{ margin: "8px 0 0", color: "var(--text-secondary)", fontSize: 13 }}>
+              Your entry has been accepted. You can still edit it until the admin locks submissions.
+            </p>
+          )}
+
+          {locked && (
+            <p style={{ margin: "8px 0 0", color: "var(--text-secondary)", fontSize: 13 }}>
+              Submissions are now locked. Your entry can no longer be changed.
+            </p>
+          )}
+        </div>
+      )}
 
       <form
         onSubmit={handleFormSubmit}
@@ -1432,52 +1841,85 @@ function SubmitView() {
             onChange={(e) => setEntrantName(e.target.value)}
             placeholder="Your Twitch name"
             required
+            disabled={locked}
             style={{ width: "100%" }}
           />
         </div>
 
-        <SongTextInput
-          onAdd={addSong}
-          disabled={submittedSongs.length >= settings.maxSongs}
-        />
+        {!locked && (
+          <SongTextInput
+            onAdd={addSong}
+            disabled={submittedSongs.length >= settings.maxSongs}
+          />
+        )}
 
         <div style={{ marginBottom: 15 }}>
           <h4 style={{ marginBottom: 8 }}>
-            Selected Songs ({submittedSongs.length}/{settings.maxSongs})
+            Songs ({submittedSongs.length}/{settings.maxSongs})
           </h4>
 
           {submittedSongs.length === 0 ? (
-            <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-              No songs selected yet.
-            </p>
+            <p style={{ fontSize: 13, color: "var(--text-muted)" }}>No songs selected yet.</p>
           ) : (
-            <ol style={{ paddingLeft: 20, margin: 0 }}>
-              {submittedSongs.map((song, idx) => (
-                <li
-                  key={`${song}-${idx}`}
-                  style={{
-                    margin: "6px 0",
-                    fontSize: 14,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 8,
-                    alignItems: "center",
-                  }}
-                >
-                  <span>{song}</span>
-                  <button
-                    type="button"
-                    onClick={() => removeSong(idx)}
+            <ol style={{ paddingLeft: 24, margin: 0 }}>
+              {submittedSongs.map((song, idx) => {
+                const denied = !!deniedSongs[idx];
+
+                return (
+                  <li
+                    key={`${idx}-${song}`}
                     style={{
-                      background: "transparent",
-                      color: "var(--text-muted)",
-                      padding: "2px 6px",
+                      margin: "8px 0",
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      background: denied ? "rgba(255,79,126,.14)" : "rgba(0,0,0,.08)",
+                      border: denied ? "1px solid var(--spark)" : "1px solid transparent",
+                      color: denied ? "var(--spark)" : "var(--text-primary)",
                     }}
                   >
-                    ✕
-                  </button>
-                </li>
-              ))}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                      <span style={{ flex: 1 }}>{song}</span>
+
+                      {!locked && (
+                        <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                          <button
+                            type="button"
+                            onClick={() => moveSong(idx, -1)}
+                            disabled={idx === 0 || saving}
+                            aria-label={`Move song ${idx + 1} up`}
+                            style={{ padding: "4px 8px" }}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveSong(idx, 1)}
+                            disabled={idx === submittedSongs.length - 1 || saving}
+                            aria-label={`Move song ${idx + 1} down`}
+                            style={{ padding: "4px 8px" }}
+                          >
+                            ↓
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removeSong(idx)}
+                            disabled={saving}
+                            style={{ padding: "4px 8px", background: "transparent", color: "var(--text-muted)" }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {denied && (
+                      <div style={{ marginTop: 5, fontSize: 11.5, color: "var(--spark)", fontWeight: 700 }}>
+                        ADMIN REQUESTED A REPLACEMENT
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ol>
           )}
         </div>
@@ -1488,32 +1930,40 @@ function SubmitView() {
           </p>
         )}
 
-        <button
-          type="submit"
-          disabled={
-            !entrantName.trim() ||
-            submittedSongs.length < settings.minSongs ||
-            submittedSongs.length > settings.maxSongs
-          }
-          style={{
-            marginTop: 20,
-            width: "100%",
-            background:
-              submittedSongs.length >= settings.minSongs && submittedSongs.length <= settings.maxSongs
-                ? "var(--spark)"
-                : "var(--surface-1)",
-            color:
-              submittedSongs.length >= settings.minSongs && submittedSongs.length <= settings.maxSongs
-                ? "var(--stage-void)"
-                : "var(--text-muted)",
-            fontWeight: 700,
-            fontSize: 16,
-            padding: "13px 16px",
-            border: "none",
-          }}
-        >
-          Submit to Bracket Queue
-        </button>
+        {!locked && (
+          <button
+            type="submit"
+            disabled={
+              saving ||
+              !entrantName.trim() ||
+              submittedSongs.length < settings.minSongs ||
+              submittedSongs.length > settings.maxSongs ||
+              (sent && !hasChanges)
+            }
+            style={{
+              marginTop: 20,
+              width: "100%",
+              background:
+                (!sent || hasChanges) &&
+                submittedSongs.length >= settings.minSongs &&
+                submittedSongs.length <= settings.maxSongs
+                  ? "var(--spark)"
+                  : "var(--surface-1)",
+              color:
+                (!sent || hasChanges) &&
+                submittedSongs.length >= settings.minSongs &&
+                submittedSongs.length <= settings.maxSongs
+                  ? "var(--stage-void)"
+                  : "var(--text-muted)",
+              fontWeight: 700,
+              fontSize: 16,
+              padding: "13px 16px",
+              border: "none",
+            }}
+          >
+            {saving ? "Saving…" : sent ? "Save changes" : "Submit to Bracket Queue"}
+          </button>
+        )}
       </form>
     </div>
   );
