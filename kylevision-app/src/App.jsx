@@ -238,7 +238,7 @@ async function addSubmission(name, songs) {
 }
 
 async function updateSubmission(id, name, songs) {
-  await sb(`submissions?id=eq.${encodeURIComponent(id)}`, {
+  return await sb(`submissions?id=eq.${encodeURIComponent(id)}&select=id,name,songs`, {
     method: "PATCH",
     body: JSON.stringify({ name, songs }),
   });
@@ -941,6 +941,27 @@ function AdminPanel() {
     }
   };
 
+  const removeAcceptedEntry = async (s) => {
+    if (!confirm(`Remove ${s.name}'s accepted submission completely? This cannot be undone.`)) return;
+    try {
+      await deleteSubmission(s.id);
+      const next = structuredClone(t);
+      next.submissionReviews = next.submissionReviews || {};
+      delete next.submissionReviews[s.id];
+      const removedEntrantIds = (next.entrants || [])
+        .filter((e) => e.submissionId === s.id)
+        .map((e) => e.id);
+      next.entrants = (next.entrants || []).filter((e) => e.submissionId !== s.id);
+      next.playedSongs = next.playedSongs || {};
+      removedEntrantIds.forEach((id) => delete next.playedSongs[id]);
+      await persist(next);
+      setSubs((prev) => prev.filter((entry) => entry.id !== s.id));
+    } catch (e) {
+      console.error("Remove accepted submission failed:", e);
+      setErr("Couldn't remove that accepted submission right now.");
+    }
+  };
+
   const pendingSubs = subs.filter((s) => {
     const status = reviewFor(s.id).status;
     return status === "pending" || status === "needs_changes";
@@ -1171,7 +1192,16 @@ function AdminPanel() {
                       padding: 16,
                     }}
                   >
-                    <div style={{ fontWeight: 800, marginBottom: 8 }}>{s.name}</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                      <div style={{ fontWeight: 800 }}>{s.name}</div>
+                      <button
+                        type="button"
+                        onClick={() => removeAcceptedEntry(s)}
+                        style={{ background: "transparent", color: "var(--spark)", borderColor: "var(--spark)", fontSize: 11, padding: "5px 9px" }}
+                      >
+                        Clear entry
+                      </button>
+                    </div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                       {(s.songs || []).map((song, i) => {
                         const played = !!t.playedSongs?.[entrant?.id]?.[i];
@@ -1496,6 +1526,7 @@ function SubmitView() {
   const [editingDeniedValue, setEditingDeniedValue] = useState("");
   const editingRef = useRef(false);
   const savedSnapshotRef = useRef("");
+  const pendingRemoteSnapshotRef = useRef("");
 
   useEffect(() => {
     let alive = true;
@@ -1518,10 +1549,17 @@ function SubmitView() {
           // Do not overwrite edits the contestant is currently making while
           // the polling loop refreshes the admin/review status.
           if (!editingRef.current) {
-            setEntrantName(mine.name || "");
-            setSubmittedSongs(songs);
-            setSavedSnapshot(remoteSnapshot);
-            savedSnapshotRef.current = remoteSnapshot;
+            // After saving, wait until the database returns the exact new
+            // snapshot before allowing polling to overwrite the local form.
+            // This prevents a stale read from restoring the old denied song.
+            const pending = pendingRemoteSnapshotRef.current;
+            if (!pending || pending === remoteSnapshot) {
+              setEntrantName(mine.name || "");
+              setSubmittedSongs(songs);
+              setSavedSnapshot(remoteSnapshot);
+              savedSnapshotRef.current = remoteSnapshot;
+              if (pending === remoteSnapshot) pendingRemoteSnapshotRef.current = "";
+            }
           }
           setSent(true);
         }
@@ -1653,7 +1691,12 @@ function SubmitView() {
     setErr("");
 
     try {
-      await updateSubmission(submissionId, cleanName, cleanSongs);
+      const updatedRows = await updateSubmission(submissionId, cleanName, cleanSongs);
+      const savedRow = Array.isArray(updatedRows) ? updatedRows[0] : updatedRows;
+      const confirmedSongs = Array.isArray(savedRow?.songs) ? savedRow.songs : cleanSongs;
+      const confirmedName = savedRow?.name || cleanName;
+      const confirmedSnapshot = JSON.stringify({ name: confirmedName, songs: confirmedSongs });
+      pendingRemoteSnapshotRef.current = confirmedSnapshot;
 
       // A denied song is considered resolved when that position is replaced.
       // Keep unchanged denied songs highlighted.
@@ -1687,17 +1730,17 @@ function SubmitView() {
       // submission so the admin/tournament view updates too.
       const entrant = nextState.entrants.find((e) => e.submissionId === submissionId);
       if (entrant) {
-        entrant.name = cleanName;
-        entrant.songs = cleanSongs.filter((_, i) => !nextDenied[i]);
+        entrant.name = confirmedName;
+        entrant.songs = confirmedSongs.filter((_, i) => !nextDenied[i]);
         entrant.songsUsed = Math.min(Number(entrant.songsUsed || 0), entrant.songs.length);
       }
 
       await saveState(nextState);
 
-      const newSnapshot = JSON.stringify({ name: cleanName, songs: cleanSongs });
+      const newSnapshot = confirmedSnapshot;
       setT(nextState);
-      setEntrantName(cleanName);
-      setSubmittedSongs(cleanSongs);
+      setEntrantName(confirmedName);
+      setSubmittedSongs(confirmedSongs);
       setSavedSnapshot(newSnapshot);
       savedSnapshotRef.current = newSnapshot;
       setEditingDeniedIndex(null);
