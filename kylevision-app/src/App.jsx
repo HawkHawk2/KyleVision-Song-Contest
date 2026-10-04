@@ -672,6 +672,8 @@ function AdminPanel() {
   const [nameInput, setNameInput] = useState("");
   const [songInput, setSongInput] = useState("");
   const [err, setErr] = useState("");
+  const [acceptedFilter, setAcceptedFilter] = useState("");
+  const [hideFinished, setHideFinished] = useState(false);
   const pollRef = useRef(null);
 
   useEffect(() => {
@@ -852,7 +854,7 @@ function AdminPanel() {
   };
 
   const pickWinner = (bracketName, ri, mi, winner) => {
-    const next = structuredClone(t);
+    let next = structuredClone(t);
     const bracket = bracketName === "losers" ? next.losers : next.winners;
     const match = bracket?.[ri]?.[mi];
 
@@ -1186,65 +1188,120 @@ function AdminPanel() {
 
       {tab === "accepted" && (
         <div>
-          <p style={{ color: "var(--text-secondary)", fontSize: 13.5 }}>
-            Click a song after you play it. Played songs turn red; click it again to mark it as not played.
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+            <input
+              type="text"
+              value={acceptedFilter}
+              onChange={(e) => setAcceptedFilter(e.target.value)}
+              placeholder="Search name or song…"
+              style={{ flex: 1, minWidth: 180 }}
+            />
+            <label style={{ fontSize: 12.5, color: "var(--text-secondary)", display: "flex", gap: 6, alignItems: "center", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={hideFinished}
+                onChange={(e) => setHideFinished(e.target.checked)}
+              />
+              Hide fully played
+            </label>
+          </div>
+
+          <p style={{ color: "var(--text-secondary)", fontSize: 12.5, margin: "0 0 10px" }}>
+            Click a song after you play it. Played songs turn red; click again to undo.
           </p>
 
-          {acceptedSubs.length === 0 ? (
-            <p style={{ color: "var(--text-muted)" }}>No accepted entries yet.</p>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {acceptedSubs.map((s) => {
-                const entrant = t.entrants.find((e) => e.submissionId === s.id);
-                return (
-                  <div
-                    key={s.id}
-                    style={{
-                      background: "var(--stage-card)",
-                      border: "1px solid var(--border)",
-                      borderRadius: "var(--radius)",
-                      padding: 16,
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                      <div style={{ fontWeight: 800 }}>{s.name}</div>
-                      <button
-                        type="button"
-                        onClick={() => removeAcceptedEntry(s)}
-                        style={{ background: "transparent", color: "var(--spark)", borderColor: "var(--spark)", fontSize: 11, padding: "5px 9px" }}
-                      >
-                        Clear entry
-                      </button>
+          {(() => {
+            const q = acceptedFilter.trim().toLowerCase();
+            const visible = acceptedSubs.filter((s) => {
+              const entrant = t.entrants.find((e) => e.submissionId === s.id);
+              const songs = s.songs || [];
+              if (hideFinished) {
+                const allPlayed =
+                  songs.length > 0 && songs.every((_, i) => t.playedSongs?.[entrant?.id]?.[i]);
+                if (allPlayed) return false;
+              }
+              if (!q) return true;
+              return (
+                (s.name || "").toLowerCase().includes(q) ||
+                songs.some((song) => song.toLowerCase().includes(q))
+              );
+            });
+
+            if (acceptedSubs.length === 0)
+              return <p style={{ color: "var(--text-muted)" }}>No accepted entries yet.</p>;
+            if (visible.length === 0)
+              return <p style={{ color: "var(--text-muted)" }}>No entries match.</p>;
+
+            return (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
+                  gap: 8,
+                  alignItems: "start",
+                }}
+              >
+                {visible.map((s) => {
+                  const entrant = t.entrants.find((e) => e.submissionId === s.id);
+                  return (
+                    <div
+                      key={s.id}
+                      style={{
+                        background: "var(--stage-card)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        padding: 8,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, marginBottom: 5 }}>
+                        <div style={{ fontWeight: 800, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {s.name}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeAcceptedEntry(s)}
+                          title="Clear entry"
+                          style={{ background: "transparent", color: "var(--spark)", borderColor: "var(--spark)", fontSize: 10, padding: "2px 6px", flexShrink: 0 }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        {(s.songs || []).map((song, i) => {
+                          const played = !!t.playedSongs?.[entrant?.id]?.[i];
+                          const denied = !!reviewFor(s.id).deniedSongs?.[i];
+                          return (
+                            <button
+                              key={`${s.id}-accepted-${i}`}
+                              type="button"
+                              disabled={denied}
+                              onClick={() => entrant && markSongPlayed(entrant.id, i)}
+                              style={{
+                                textAlign: "left",
+                                fontSize: 12,
+                                lineHeight: 1.25,
+                                padding: "4px 7px",
+                                background: played ? "rgba(255,79,126,.16)" : "rgba(0,0,0,.12)",
+                                color: played ? "var(--spark)" : "var(--text-primary)",
+                                borderColor: played ? "var(--spark)" : "var(--border)",
+                                textDecoration: denied ? "line-through" : played ? "line-through" : "none",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                              title={song}
+                            >
+                              <strong style={{ marginRight: 5 }}>{i + 1}.</strong>{song}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {(s.songs || []).map((song, i) => {
-                        const played = !!t.playedSongs?.[entrant?.id]?.[i];
-                        const denied = !!reviewFor(s.id).deniedSongs?.[i];
-                        return (
-                          <button
-                            key={`${s.id}-accepted-${i}`}
-                            type="button"
-                            disabled={denied}
-                            onClick={() => entrant && markSongPlayed(entrant.id, i)}
-                            style={{
-                              textAlign: "left",
-                              background: played ? "rgba(255,79,126,.16)" : "rgba(0,0,0,.12)",
-                              color: played ? "var(--spark)" : "var(--text-primary)",
-                              borderColor: played ? "var(--spark)" : "var(--border)",
-                              textDecoration: denied ? "line-through" : "none",
-                            }}
-                          >
-                            <strong style={{ marginRight: 8 }}>{i + 1}.</strong>{song}
-                            {played && <span style={{ float: "right", fontWeight: 800 }}>PLAYED</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -2111,7 +2168,7 @@ export default function App() {
   };
 
   return (
-    <div style={{ padding: "1.5rem 1rem", maxWidth: 900, margin: "0 auto" }}>
+    <div style={{ padding: "1.5rem 1rem", maxWidth: view === "admin" ? 1400 : 900, margin: "0 auto" }}>
       {!isDedicatedRoute && (
         <div style={{ display: "flex", gap: 6, marginBottom: 24, flexWrap: "wrap" }}>
           {[
