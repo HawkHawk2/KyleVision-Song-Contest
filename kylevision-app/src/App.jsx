@@ -1675,7 +1675,7 @@ function SubmitView() {
         ? "var(--spark)"
         : "var(--gold)";
 
-  if (!acceptedRules && !sent) {
+  if (!acceptedRules) {
     return (
       <RulesGate
         settings={settings}
