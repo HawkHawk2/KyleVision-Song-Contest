@@ -5,7 +5,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 
 const emptyTournament = () => ({
   id: uid(),
-  name: "KyleVision",
+  name: "HDrVision",
   status: "setup", // setup | running | done
   contestNumber: 1,
   requiredSongs: 3, // kept for backwards compatibility; min/max below control submissions
@@ -1461,10 +1461,10 @@ function RulesGate({ settings, onContinue }) {
   return (
     <div style={{ maxWidth: 620, margin: "3rem auto", textAlign: "center", padding: "0 1rem" }}>
       <div style={{ color: "var(--spark)", fontWeight: 700, fontSize: 13, letterSpacing: ".06em" }}>
-        KYLEVISION
+        HDRVISION
       </div>
       <h1 style={{ fontSize: 42, marginTop: 8 }}>
-        Welcome to KyleVision Song Contest #{settings.contestNumber}
+        Welcome to HDrVision Song Contest #{settings.contestNumber}
       </h1>
 
       <div
@@ -1907,7 +1907,7 @@ function SubmitView() {
     <div style={{ maxWidth: 560, margin: "0 auto", padding: "1rem 0 3rem" }}>
       <div style={{ textAlign: "center", marginBottom: 28 }}>
         <div style={{ fontSize: 13, color: "var(--spark)", fontWeight: 700 }}>
-          KYLEVISION SONG CONTEST #{settings.contestNumber}
+          HDRVISION SONG CONTEST #{settings.contestNumber}
         </div>
         <h1 style={{ fontSize: 40 }}>{sent ? "Your submission" : "Submit your entry"}</h1>
         <p style={{ marginTop: 8 }}>
